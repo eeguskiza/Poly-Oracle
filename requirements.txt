@@ -1,0 +1,7 @@
+typer
+loguru
+pydantic
+pydantic-settings
+httpx
+duckdb
+chromadb
