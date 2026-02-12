@@ -11,6 +11,7 @@ from src.data.storage.sqlite_client import SQLiteClient
 from src.data.storage.chroma_client import ChromaClient
 from src.data.sources.polymarket import PolymarketClient
 from src.data.sources.news import NewsClient
+from src.data.context import ContextBuilder
 from src.models import MarketFilter
 
 app = typer.Typer(no_args_is_help=True)
@@ -73,6 +74,9 @@ def status() -> None:
         typer.echo("")
 
         ollama_status = "OFFLINE"
+        model_available = False
+        available_models = []
+
         try:
             response = httpx.get(
                 f"{settings.llm.base_url}/api/tags",
@@ -80,12 +84,22 @@ def status() -> None:
             )
             if response.status_code == 200:
                 ollama_status = "ONLINE"
+                data = response.json()
+                models = data.get("models", [])
+                available_models = [m.get("name", "") for m in models]
+
+                for model_name in available_models:
+                    if settings.llm.model in model_name or model_name.startswith(settings.llm.model):
+                        model_available = True
+                        break
         except Exception:
             pass
 
         typer.echo(f"Ollama status: {ollama_status}")
         typer.echo(f"Ollama URL: {settings.llm.base_url}")
-        typer.echo(f"Model: {settings.llm.model}")
+        typer.echo(f"Model: {settings.llm.model} - {'AVAILABLE' if model_available else 'NOT FOUND'}")
+        if available_models and not model_available:
+            typer.echo(f"  Available models: {', '.join(available_models[:3])}")
         typer.echo(f"Embedding model: {settings.llm.embedding_model}")
         typer.echo("")
 
@@ -357,15 +371,188 @@ def market_news(market_id: str) -> None:
 
 
 @app.command()
-def context() -> None:
+def context(market_id: str = typer.Argument(..., help="Market ID to build context for")) -> None:
     """Build context for a market."""
-    typer.echo("Command not yet implemented")
+    try:
+        settings = get_settings()
+        setup_logging(settings.log_level, settings.database.db_dir / "logs")
+
+        async def build_and_display_context() -> None:
+            async with PolymarketClient() as poly_client, \
+                       NewsClient() as news_client:
+
+                market = await poly_client.get_market(market_id)
+
+                typer.echo(f"\nBuilding context for market: {market.id}")
+                typer.echo("=" * 80)
+
+                with ChromaClient(settings.database.chroma_path, settings.llm.embedding_model) as chroma_client:
+                    builder = ContextBuilder(
+                        polymarket_client=poly_client,
+                        news_client=news_client,
+                        chroma_client=chroma_client,
+                    )
+
+                    context_text = await builder.build_context(market)
+
+                typer.echo(context_text)
+                typer.echo("=" * 80)
+                typer.echo(f"\nContext built and stored in ChromaDB")
+
+        asyncio.run(build_and_display_context())
+
+    except MarketNotFoundError:
+        typer.echo(f"Market {market_id} not found", err=True)
+        raise typer.Exit(code=1)
+    except DataFetchError as e:
+        typer.echo(f"Failed to fetch data: {e}", err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        logger.exception("Context command failed")
+        raise typer.Exit(code=1)
 
 
 @app.command()
-def forecast() -> None:
-    """Generate forecast for a market."""
-    typer.echo("Command not yet implemented")
+def forecast(
+    market_id: str = typer.Argument(..., help="Market ID to forecast"),
+    rounds: int = typer.Option(2, "--rounds", "-r", help="Number of debate rounds"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show detailed debate output"),
+    temperature: float = typer.Option(0.7, "--temperature", "-t", help="LLM temperature (0.0-1.0)"),
+) -> None:
+    """
+    Generate forecast for a market using multi-agent debate.
+
+    Example:
+        poly-oracle forecast 0x123abc --rounds 2 --verbose
+    """
+    from src.agents import create_debate_system
+    from src.data.sources.polymarket import PolymarketClient
+    from src.data.sources.news import NewsClient
+    from src.data.context import ContextBuilder
+    from src.data.clients.chroma_client import ChromaClient
+    from src.utils.exceptions import MarketNotFoundError, DataFetchError
+
+    try:
+        settings = get_settings()
+
+        async def run_forecast() -> None:
+            # Check Ollama availability first
+            typer.echo("Checking Ollama availability...")
+            from src.agents.base import OllamaClient
+
+            async with OllamaClient(
+                base_url=settings.llm.base_url,
+                model=settings.llm.model,
+                timeout=120
+            ) as test_ollama:
+                is_available = await test_ollama.is_available()
+
+                if not is_available:
+                    typer.echo(f"\nError: Ollama model '{settings.llm.model}' is not available.", err=True)
+                    typer.echo("\nPlease ensure:")
+                    typer.echo(f"1. Ollama is running (ollama serve)")
+                    typer.echo(f"2. Model is pulled (ollama pull {settings.llm.model})")
+                    raise typer.Exit(code=1)
+
+            typer.echo(f"✓ Ollama model '{settings.llm.model}' is ready\n")
+
+            # Fetch market and build context
+            typer.echo(f"Fetching market {market_id}...")
+            async with PolymarketClient() as poly_client, \
+                       NewsClient() as news_client:
+
+                market = await poly_client.get_market(market_id)
+
+                typer.echo(f"Market: {market.question}")
+                typer.echo(f"Current Price: {market.current_price:.1%}")
+                typer.echo("\nBuilding context...")
+
+                with ChromaClient(settings.database.chroma_path, settings.llm.embedding_model) as chroma_client:
+                    builder = ContextBuilder(
+                        polymarket_client=poly_client,
+                        news_client=news_client,
+                        chroma_client=chroma_client,
+                    )
+
+                    context_text = await builder.build_context(market)
+
+                typer.echo("✓ Context ready\n")
+
+                # Create debate system and run forecast
+                typer.echo(f"Starting {rounds}-round debate...\n")
+                typer.echo("=" * 80)
+
+                orchestrator, ollama = create_debate_system(
+                    base_url=settings.llm.base_url,
+                    model=settings.llm.model,
+                    timeout=120,
+                )
+
+                try:
+                    forecast_result = await orchestrator.run_debate(
+                        market_id=market_id,
+                        context=context_text,
+                        rounds=rounds,
+                        temperature=temperature,
+                        verbose=verbose,
+                    )
+
+                    # Display results
+                    typer.echo("\n" + "=" * 80)
+                    typer.echo("FORECAST COMPLETE")
+                    typer.echo("=" * 80)
+                    typer.echo(f"\nMarket: {market.question}")
+                    typer.echo(f"Market Price: {market.current_price:.1%}")
+                    typer.echo(f"Our Forecast: {forecast_result.probability:.1%}")
+
+                    if forecast_result.confidence_lower and forecast_result.confidence_upper:
+                        typer.echo(
+                            f"Confidence Interval: {forecast_result.confidence_lower:.1%} to "
+                            f"{forecast_result.confidence_upper:.1%}"
+                        )
+
+                    edge = forecast_result.probability - market.current_price
+                    typer.echo(f"Edge: {edge:+.1%}")
+
+                    if abs(edge) >= 0.05:
+                        direction = "BUY YES" if edge > 0 else "BUY NO"
+                        typer.echo(f"\nRecommendation: {direction} (edge > 5%)")
+                    else:
+                        typer.echo(f"\nRecommendation: SKIP (edge < 5%)")
+
+                    typer.echo(f"\nDebate Rounds: {forecast_result.debate_rounds}")
+                    typer.echo(f"Model: {forecast_result.model_name}")
+                    typer.echo(f"Timestamp: {forecast_result.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+
+                    # Show probability evolution
+                    if forecast_result.bull_probabilities or forecast_result.bear_probabilities:
+                        typer.echo("\nProbability Evolution:")
+                        for i, (bull_p, bear_p) in enumerate(
+                            zip(forecast_result.bull_probabilities, forecast_result.bear_probabilities), 1
+                        ):
+                            typer.echo(f"  Round {i}: Bull={bull_p:.1%}, Bear={bear_p:.1%}")
+
+                    typer.echo("\nJudge's Reasoning:")
+                    typer.echo("-" * 80)
+                    typer.echo(forecast_result.reasoning)
+                    typer.echo("=" * 80)
+
+                finally:
+                    await ollama.close()
+
+        asyncio.run(run_forecast())
+
+    except MarketNotFoundError:
+        typer.echo(f"Market {market_id} not found", err=True)
+        raise typer.Exit(code=1)
+    except DataFetchError as e:
+        typer.echo(f"Failed to fetch data: {e}", err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        logger.exception("Forecast command failed")
+        raise typer.Exit(code=1)
 
 
 @app.command()

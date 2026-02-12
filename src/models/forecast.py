@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -42,6 +42,42 @@ class CalibratedForecast(BaseModel):
     def validate_probability_range(cls, v: float) -> float:
         if not 0.0 <= v <= 1.0:
             raise ValueError("Probabilities must be between 0 and 1")
+        return v
+
+
+class SimpleForecast(BaseModel):
+    """
+    Simple forecast output from debate orchestrator.
+
+    This is the immediate output from a debate session,
+    before calibration and edge analysis.
+    """
+
+    model_config = {"from_attributes": True}
+
+    market_id: str
+    probability: float = Field(ge=0.0, le=1.0)
+    confidence_lower: float | None = Field(default=None, ge=0.0, le=1.0)
+    confidence_upper: float | None = Field(default=None, ge=0.0, le=1.0)
+    reasoning: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    model_name: str
+    debate_rounds: int
+    bull_probabilities: list[float] = Field(default_factory=list)
+    bear_probabilities: list[float] = Field(default_factory=list)
+
+    @field_validator("probability")
+    @classmethod
+    def validate_probability(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("Probability must be between 0 and 1")
+        return v
+
+    @field_validator("confidence_lower", "confidence_upper")
+    @classmethod
+    def validate_confidence_bounds(cls, v: float | None) -> float | None:
+        if v is not None and not 0.0 <= v <= 1.0:
+            raise ValueError("Confidence bounds must be between 0 and 1")
         return v
 
 

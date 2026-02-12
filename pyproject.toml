@@ -16,6 +16,7 @@ dependencies = [
     "duckdb",
     "chromadb",
     "feedparser",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]

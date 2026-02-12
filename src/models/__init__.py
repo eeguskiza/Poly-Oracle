@@ -3,6 +3,7 @@ from src.models.forecast import (
     DebateRound,
     RawForecast,
     CalibratedForecast,
+    SimpleForecast,
     Forecast,
     EdgeAnalysis,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "DebateRound",
     "RawForecast",
     "CalibratedForecast",
+    "SimpleForecast",
     "Forecast",
     "EdgeAnalysis",
     "PositionSize",
