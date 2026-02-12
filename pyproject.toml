@@ -17,6 +17,7 @@ dependencies = [
     "chromadb",
     "feedparser",
     "pyyaml",
+    "scikit-learn",
 ]
 
 [project.optional-dependencies]

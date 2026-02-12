@@ -430,7 +430,9 @@ def forecast(
     from src.data.sources.polymarket import PolymarketClient
     from src.data.sources.news import NewsClient
     from src.data.context import ContextBuilder
-    from src.data.clients.chroma_client import ChromaClient
+    from src.data.storage.chroma_client import ChromaClient
+    from src.data.storage.duckdb_client import DuckDBClient
+    from src.calibration import CalibratorAgent, MetaAnalyzer, FeedbackLoop
     from src.utils.exceptions import MarketNotFoundError, DataFetchError
 
     try:
@@ -498,13 +500,56 @@ def forecast(
                         verbose=verbose,
                     )
 
+                    # Initialize calibration system
+                    with DuckDBClient(settings.database.duckdb_path) as duckdb_client:
+                        calibrator = CalibratorAgent(history_db=duckdb_client)
+                        analyzer = MetaAnalyzer(
+                            min_edge=settings.risk.min_edge,
+                            min_confidence=0.6,  # Could be configurable
+                            min_liquidity=settings.risk.min_liquidity,
+                        )
+                        feedback = FeedbackLoop(db=duckdb_client, calibrator=calibrator)
+
+                        # Calculate confidence from interval if available
+                        confidence = 0.5
+                        if forecast_result.confidence_lower and forecast_result.confidence_upper:
+                            confidence = 1.0 - (forecast_result.confidence_upper - forecast_result.confidence_lower)
+
+                        # Calibrate forecast
+                        calibrated = calibrator.calibrate(
+                            raw_forecast=forecast_result.probability,
+                            market_type=market.market_type,
+                            confidence=confidence,
+                        )
+
+                        # Analyze edge
+                        edge_analysis = analyzer.analyze(
+                            our_forecast=calibrated,
+                            market_price=market.current_price,
+                            liquidity=market.liquidity,
+                        )
+
+                        # Record forecast in database
+                        feedback.record_forecast(
+                            forecast=forecast_result,
+                            market=market,
+                            calibrated_probability=calibrated.calibrated,
+                            edge=edge_analysis.raw_edge,
+                            recommended_action=edge_analysis.recommended_action,
+                        )
+
                     # Display results
                     typer.echo("\n" + "=" * 80)
                     typer.echo("FORECAST COMPLETE")
                     typer.echo("=" * 80)
                     typer.echo(f"\nMarket: {market.question}")
                     typer.echo(f"Market Price: {market.current_price:.1%}")
-                    typer.echo(f"Our Forecast: {forecast_result.probability:.1%}")
+                    typer.echo(f"Raw P(YES): {forecast_result.probability:.1%}")
+                    typer.echo(f"Calibrated P(YES): {calibrated.calibrated:.1%}")
+
+                    if calibrated.calibration_method != "identity":
+                        adjustment = calibrated.calibrated - calibrated.raw
+                        typer.echo(f"Calibration adjustment: {adjustment:+.1%} (based on {calibrated.historical_samples} samples)")
 
                     if forecast_result.confidence_lower and forecast_result.confidence_upper:
                         typer.echo(
@@ -512,14 +557,11 @@ def forecast(
                             f"{forecast_result.confidence_upper:.1%}"
                         )
 
-                    edge = forecast_result.probability - market.current_price
-                    typer.echo(f"Edge: {edge:+.1%}")
-
-                    if abs(edge) >= 0.05:
-                        direction = "BUY YES" if edge > 0 else "BUY NO"
-                        typer.echo(f"\nRecommendation: {direction} (edge > 5%)")
-                    else:
-                        typer.echo(f"\nRecommendation: SKIP (edge < 5%)")
+                    typer.echo(f"\nEdge Analysis:")
+                    typer.echo(f"  Raw Edge: {edge_analysis.raw_edge:+.1%}")
+                    typer.echo(f"  Absolute Edge: {edge_analysis.abs_edge:.1%}")
+                    typer.echo(f"  Direction: {edge_analysis.direction}")
+                    typer.echo(f"  Recommendation: {edge_analysis.recommended_action}")
 
                     typer.echo(f"\nDebate Rounds: {forecast_result.debate_rounds}")
                     typer.echo(f"Model: {forecast_result.model_name}")
@@ -533,8 +575,14 @@ def forecast(
                         ):
                             typer.echo(f"  Round {i}: Bull={bull_p:.1%}, Bear={bear_p:.1%}")
 
-                    typer.echo("\nJudge's Reasoning:")
-                    typer.echo("-" * 80)
+                    typer.echo("\n" + "=" * 80)
+                    typer.echo("EDGE ANALYSIS REASONING")
+                    typer.echo("=" * 80)
+                    typer.echo(edge_analysis.reasoning)
+
+                    typer.echo("\n" + "=" * 80)
+                    typer.echo("JUDGE'S REASONING")
+                    typer.echo("=" * 80)
                     typer.echo(forecast_result.reasoning)
                     typer.echo("=" * 80)
 
@@ -556,21 +604,507 @@ def forecast(
 
 
 @app.command()
+def calibration() -> None:
+    """
+    Show calibration performance report.
+
+    Displays Brier scores, calibration curves, and performance metrics
+    based on resolved forecasts.
+    """
+    from src.data.storage.duckdb_client import DuckDBClient
+    from src.calibration import CalibratorAgent
+
+    try:
+        settings = get_settings()
+
+        with DuckDBClient(settings.database.duckdb_path) as duckdb_client:
+            calibrator = CalibratorAgent(history_db=duckdb_client)
+            report = calibrator.get_calibration_report()
+
+        if report.get("resolved_forecasts", 0) == 0:
+            typer.echo("No resolved forecasts yet.")
+            typer.echo("\nTo build calibration data:")
+            typer.echo("1. Run forecasts with: poly-oracle forecast <market_id>")
+            typer.echo("2. Wait for markets to resolve or use: poly-oracle resolve <market_id> <yes|no>")
+            return
+
+        typer.echo("=" * 80)
+        typer.echo("CALIBRATION REPORT")
+        typer.echo("=" * 80)
+        typer.echo(f"\nTotal Forecasts: {report['total_forecasts']}")
+        typer.echo(f"Resolved Forecasts: {report['resolved_forecasts']}")
+        typer.echo(f"Pending Forecasts: {report['total_forecasts'] - report['resolved_forecasts']}")
+
+        typer.echo(f"\nOverall Performance:")
+        if report.get("brier_score_raw"):
+            typer.echo(f"  Brier Score (Raw): {report['brier_score_raw']:.4f}")
+        if report.get("brier_score_calibrated"):
+            typer.echo(f"  Brier Score (Calibrated): {report['brier_score_calibrated']:.4f}")
+        if report.get("improvement"):
+            typer.echo(f"  Calibration Improvement: {report['improvement']:.4f}")
+
+        if report.get("brier_by_type"):
+            typer.echo(f"\nPerformance by Market Type:")
+            for mtype, metrics in report["brier_by_type"].items():
+                typer.echo(f"\n  {mtype}:")
+                typer.echo(f"    Count: {metrics['count']}")
+                typer.echo(f"    Brier (Raw): {metrics['brier_raw']:.4f}")
+                typer.echo(f"    Brier (Calibrated): {metrics['brier_calibrated']:.4f}")
+                typer.echo(f"    Improvement: {metrics['improvement']:.4f}")
+
+        if report.get("calibration_curve"):
+            typer.echo(f"\nCalibration Curve:")
+            typer.echo(f"  {'Predicted':<12} {'Actual':<12} {'Count':<8}")
+            typer.echo("  " + "-" * 32)
+            for point in report["calibration_curve"]:
+                typer.echo(
+                    f"  {point['predicted_prob']:.1%}          "
+                    f"{point['actual_freq']:.1%}          "
+                    f"{point['count']}"
+                )
+
+        typer.echo("\n" + "=" * 80)
+
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        logger.exception("Calibration command failed")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def resolve(
+    market_id: str = typer.Argument(..., help="Market ID to resolve"),
+    outcome: str = typer.Argument(..., help="Outcome: 'yes' or 'no'"),
+) -> None:
+    """
+    Manually resolve a market outcome.
+
+    Updates the forecast with the outcome and calculates Brier score.
+    Useful for tracking performance during early development.
+
+    Example:
+        poly-oracle resolve 0x123abc yes
+    """
+    from src.data.storage.duckdb_client import DuckDBClient
+    from src.calibration import CalibratorAgent, FeedbackLoop
+
+    try:
+        settings = get_settings()
+
+        # Parse outcome
+        outcome_lower = outcome.lower()
+        if outcome_lower not in ["yes", "no"]:
+            typer.echo("Outcome must be 'yes' or 'no'", err=True)
+            raise typer.Exit(code=1)
+
+        outcome_bool = outcome_lower == "yes"
+
+        # Process resolution
+        with DuckDBClient(settings.database.duckdb_path) as duckdb_client:
+            calibrator = CalibratorAgent(history_db=duckdb_client)
+            feedback = FeedbackLoop(db=duckdb_client, calibrator=calibrator)
+
+            result = feedback.process_resolution(
+                market_id=market_id,
+                outcome=outcome_bool,
+            )
+
+        if not result.get("success"):
+            typer.echo(f"Error: {result.get('error', 'Unknown error')}", err=True)
+            raise typer.Exit(code=1)
+
+        typer.echo("=" * 80)
+        typer.echo("MARKET RESOLVED")
+        typer.echo("=" * 80)
+        typer.echo(f"\nMarket ID: {market_id}")
+        typer.echo(f"Outcome: {'YES' if outcome_bool else 'NO'}")
+        typer.echo(f"\nBrier Score (Raw): {result['brier_score_raw']:.4f}")
+        typer.echo(f"Brier Score (Calibrated): {result['brier_score_calibrated']:.4f}")
+        typer.echo(f"Improvement: {result['improvement']:+.4f}")
+
+        if result['improvement'] > 0:
+            typer.echo("\n✓ Calibration improved forecast accuracy")
+        elif result['improvement'] < 0:
+            typer.echo("\n✗ Calibration made forecast worse")
+        else:
+            typer.echo("\n= No change from calibration")
+
+        typer.echo("=" * 80)
+
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        logger.exception("Resolve command failed")
+        raise typer.Exit(code=1)
+
+
+@app.command()
 def backtest() -> None:
     """Run historical calibration."""
     typer.echo("Command not yet implemented")
 
 
 @app.command()
-def paper() -> None:
-    """Run in paper trading mode."""
-    typer.echo("Command not yet implemented")
+def paper(
+    once: bool = typer.Option(False, "--once", help="Run one cycle and exit"),
+    interval: int = typer.Option(60, "--interval", "-i", help="Minutes between cycles (if not --once)"),
+    top_markets: int = typer.Option(5, "--top", "-n", help="Number of top markets to analyze per cycle"),
+) -> None:
+    """
+    Run in paper trading mode.
+
+    Continuously monitors markets, generates forecasts, and executes paper trades.
+
+    Example:
+        poly-oracle paper --once              # Run one cycle
+        poly-oracle paper --interval 30       # Run every 30 minutes
+        poly-oracle paper --once --top 3      # Analyze top 3 markets by liquidity
+    """
+    import asyncio
+    import time
+    from src.agents import create_debate_system
+    from src.data.sources.polymarket import PolymarketClient
+    from src.data.sources.news import NewsClient
+    from src.data.context import ContextBuilder
+    from src.data.storage.chroma_client import ChromaClient
+    from src.data.storage.duckdb_client import DuckDBClient
+    from src.data.storage.sqlite_client import SQLiteClient
+    from src.calibration import CalibratorAgent, MetaAnalyzer, FeedbackLoop
+    from src.execution import PositionSizer, RiskManager, PaperTradingExecutor
+
+    settings = get_settings()
+
+    async def run_cycle() -> None:
+        """Run one complete trading cycle."""
+        cycle_start = time.time()
+
+        typer.echo("\n" + "=" * 80)
+        typer.echo(f"PAPER TRADING CYCLE - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        typer.echo("=" * 80)
+
+        # Initialize clients
+        with SQLiteClient(settings.database.sqlite_path) as sqlite_client, \
+             DuckDBClient(settings.database.duckdb_path) as duckdb_client:
+
+            # Get current bankroll
+            bankroll = sqlite_client.get_current_bankroll()
+            typer.echo(f"\nCurrent Bankroll: ${bankroll:.2f}")
+
+            # Initialize execution components
+            sizer = PositionSizer(risk_settings=settings.risk)
+            risk_manager = RiskManager(risk_settings=settings.risk)
+            executor = PaperTradingExecutor(
+                sqlite=sqlite_client,
+                sizer=sizer,
+                risk=risk_manager,
+            )
+
+            # Initialize calibration
+            calibrator = CalibratorAgent(history_db=duckdb_client)
+            analyzer = MetaAnalyzer(
+                min_edge=settings.risk.min_edge,
+                min_confidence=0.6,
+                min_liquidity=settings.risk.min_liquidity,
+            )
+            feedback = FeedbackLoop(db=duckdb_client, calibrator=calibrator)
+
+            # Fetch active markets
+            typer.echo(f"\nFetching active markets...")
+            async with PolymarketClient() as poly_client, \
+                       NewsClient() as news_client:
+
+                markets = await poly_client.get_active_markets()
+
+                # Filter by liquidity
+                filtered_markets = [
+                    m for m in markets
+                    if m.liquidity >= settings.risk.min_liquidity
+                ]
+
+                # Sort by liquidity and take top N
+                filtered_markets.sort(key=lambda m: m.liquidity, reverse=True)
+                target_markets = filtered_markets[:top_markets]
+
+                typer.echo(
+                    f"Found {len(markets)} active markets, "
+                    f"{len(filtered_markets)} with sufficient liquidity, "
+                    f"analyzing top {len(target_markets)}"
+                )
+
+                trades_attempted = 0
+                trades_executed = 0
+                trades_skipped = 0
+
+                # Process each market
+                for idx, market in enumerate(target_markets, 1):
+                    typer.echo(f"\n[{idx}/{len(target_markets)}] Analyzing {market.question[:60]}...")
+                    typer.echo(f"  Liquidity: ${market.liquidity:,.0f} | Price: {market.current_price:.1%}")
+
+                    try:
+                        # Build context
+                        with ChromaClient(settings.database.chroma_path, settings.llm.embedding_model) as chroma_client:
+                            builder = ContextBuilder(
+                                polymarket_client=poly_client,
+                                news_client=news_client,
+                                chroma_client=chroma_client,
+                            )
+                            context_text = await builder.build_context(market)
+
+                        # Create debate system and run forecast
+                        orchestrator, ollama = create_debate_system(
+                            base_url=settings.llm.base_url,
+                            model=settings.llm.model,
+                            timeout=120,
+                        )
+
+                        try:
+                            forecast_result = await orchestrator.run_debate(
+                                market_id=market.id,
+                                context=context_text,
+                                rounds=1,  # Use 1 round for faster cycles
+                                temperature=0.7,
+                                verbose=False,
+                            )
+
+                            # Calibrate forecast
+                            confidence = 0.5
+                            if forecast_result.confidence_lower and forecast_result.confidence_upper:
+                                confidence = 1.0 - (forecast_result.confidence_upper - forecast_result.confidence_lower)
+
+                            calibrated = calibrator.calibrate(
+                                raw_forecast=forecast_result.probability,
+                                market_type=market.market_type,
+                                confidence=confidence,
+                            )
+
+                            # Analyze edge
+                            edge_analysis = analyzer.analyze(
+                                our_forecast=calibrated,
+                                market_price=market.current_price,
+                                liquidity=market.liquidity,
+                            )
+
+                            typer.echo(f"  Forecast: {calibrated.calibrated:.1%} (raw: {forecast_result.probability:.1%})")
+                            typer.echo(f"  Edge: {edge_analysis.raw_edge:+.1%} | Recommendation: {edge_analysis.recommended_action}")
+
+                            # Record forecast
+                            feedback.record_forecast(
+                                forecast=forecast_result,
+                                market=market,
+                                calibrated_probability=calibrated.calibrated,
+                                edge=edge_analysis.raw_edge,
+                                recommended_action=edge_analysis.recommended_action,
+                            )
+
+                            # Attempt execution
+                            if edge_analysis.recommended_action == "TRADE":
+                                trades_attempted += 1
+
+                                execution_result = await executor.execute(
+                                    edge_analysis=edge_analysis,
+                                    calibrated_probability=calibrated.calibrated,
+                                    market=market,
+                                    bankroll=bankroll,
+                                )
+
+                                if execution_result and execution_result.success:
+                                    trades_executed += 1
+                                    typer.echo(f"  ✓ Trade executed: {execution_result.message}")
+                                elif execution_result:
+                                    typer.echo(f"  ✗ Trade rejected: {execution_result.message}")
+                                else:
+                                    typer.echo(f"  ○ Trade skipped (insufficient size)")
+                            else:
+                                trades_skipped += 1
+
+                        finally:
+                            await ollama.close()
+
+                    except Exception as e:
+                        typer.echo(f"  ✗ Error processing market: {e}")
+                        logger.exception(f"Error processing market {market.id}")
+
+            # Cycle summary
+            cycle_duration = time.time() - cycle_start
+            typer.echo("\n" + "=" * 80)
+            typer.echo("CYCLE SUMMARY")
+            typer.echo("=" * 80)
+            typer.echo(f"Markets Analyzed: {len(target_markets)}")
+            typer.echo(f"Trades Attempted: {trades_attempted}")
+            typer.echo(f"Trades Executed: {trades_executed}")
+            typer.echo(f"Trades Skipped: {trades_skipped}")
+            typer.echo(f"Cycle Duration: {cycle_duration:.1f}s")
+            typer.echo("=" * 80)
+
+    # Main loop
+    try:
+        if once:
+            typer.echo("Running single paper trading cycle...")
+            asyncio.run(run_cycle())
+            typer.echo("\nCycle complete. Use 'poly-oracle positions' to view portfolio.")
+        else:
+            typer.echo(f"Starting continuous paper trading (interval: {interval} minutes)")
+            typer.echo("Press Ctrl+C to stop")
+
+            while True:
+                asyncio.run(run_cycle())
+
+                if interval > 0:
+                    typer.echo(f"\nSleeping for {interval} minutes...")
+                    time.sleep(interval * 60)
+                else:
+                    typer.echo("\nInterval is 0, exiting after one cycle")
+                    break
+
+    except KeyboardInterrupt:
+        typer.echo("\n\nPaper trading stopped by user")
+    except Exception as e:
+        typer.echo(f"\nError in paper trading: {e}", err=True)
+        logger.exception("Paper trading failed")
+        raise typer.Exit(code=1)
 
 
 @app.command()
 def live() -> None:
     """Run in live trading mode."""
     typer.echo("Command not yet implemented")
+
+
+@app.command()
+def positions() -> None:
+    """
+    Display current open positions.
+
+    Shows all open positions with current P&L and portfolio summary.
+    """
+    from src.data.storage.sqlite_client import SQLiteClient
+
+    try:
+        settings = get_settings()
+
+        with SQLiteClient(settings.database.sqlite_path) as sqlite_client:
+            positions = sqlite_client.get_open_positions()
+            bankroll = sqlite_client.get_current_bankroll()
+
+            if not positions:
+                typer.echo("No open positions")
+                typer.echo(f"\nCurrent Bankroll: ${bankroll:.2f}")
+                return
+
+            typer.echo("=" * 120)
+            typer.echo("OPEN POSITIONS")
+            typer.echo("=" * 120)
+
+            # Header
+            typer.echo(
+                f"{'Market ID':<20} {'Direction':<10} {'Shares':<12} {'Avg Entry':<12} "
+                f"{'Current':<12} {'P&L':<15} {'P&L %':<10}"
+            )
+            typer.echo("-" * 120)
+
+            total_pnl = 0.0
+
+            for pos in positions:
+                # Calculate unrealized P&L
+                if pos.direction == "BUY_YES":
+                    unrealized_pnl = (pos.current_price - pos.avg_entry_price) * pos.num_shares
+                else:  # BUY_NO
+                    unrealized_pnl = (pos.avg_entry_price - pos.current_price) * pos.num_shares
+
+                pnl_pct = (unrealized_pnl / pos.amount_usd * 100) if pos.amount_usd > 0 else 0
+                total_pnl += unrealized_pnl
+
+                # Color code P&L
+                pnl_str = f"${unrealized_pnl:+.2f}"
+                pnl_pct_str = f"{pnl_pct:+.1f}%"
+
+                typer.echo(
+                    f"{pos.market_id[:20]:<20} {pos.direction:<10} {pos.num_shares:<12.2f} "
+                    f"${pos.avg_entry_price:<11.2f} ${pos.current_price:<11.2f} "
+                    f"{pnl_str:<15} {pnl_pct_str:<10}"
+                )
+
+            typer.echo("=" * 120)
+            typer.echo(f"Total Positions: {len(positions)}")
+            typer.echo(f"Total Unrealized P&L: ${total_pnl:+.2f}")
+            typer.echo(f"Current Bankroll: ${bankroll:.2f}")
+            typer.echo(f"Total Portfolio Value: ${bankroll + total_pnl:.2f}")
+            typer.echo("=" * 120)
+
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        logger.exception("Positions command failed")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def trades(
+    limit: int = typer.Option(20, "--limit", "-n", help="Number of recent trades to show"),
+) -> None:
+    """
+    Display trade history.
+
+    Shows recent executed trades.
+
+    Example:
+        poly-oracle trades --limit 10
+    """
+    from src.data.storage.sqlite_client import SQLiteClient
+
+    try:
+        settings = get_settings()
+
+        with SQLiteClient(settings.database.sqlite_path) as sqlite_client:
+            # Get all trades (SQLiteClient doesn't have get_trades yet, so we query directly)
+            result = sqlite_client.conn.execute(
+                """
+                SELECT
+                    id, market_id, direction, amount_usd, num_shares,
+                    entry_price, exit_price, pnl, timestamp, status
+                FROM trades
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                [limit],
+            ).fetchall()
+
+            if not result:
+                typer.echo("No trades found")
+                return
+
+            typer.echo("=" * 140)
+            typer.echo("TRADE HISTORY")
+            typer.echo("=" * 140)
+
+            # Header
+            typer.echo(
+                f"{'Timestamp':<20} {'Market ID':<20} {'Direction':<10} "
+                f"{'Amount':<12} {'Shares':<12} {'Entry':<10} {'Status':<10}"
+            )
+            typer.echo("-" * 140)
+
+            for row in result:
+                trade_id, market_id, direction, amount, shares, entry, exit_p, pnl, timestamp, status = row
+
+                # Parse timestamp
+                if isinstance(timestamp, str):
+                    dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+                    timestamp_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    timestamp_str = str(timestamp)[:19]
+
+                typer.echo(
+                    f"{timestamp_str:<20} {market_id[:20]:<20} {direction:<10} "
+                    f"${amount:<11.2f} {shares:<12.2f} ${entry:<9.2f} {status:<10}"
+                )
+
+            typer.echo("=" * 140)
+            typer.echo(f"Showing {len(result)} most recent trades")
+            typer.echo("=" * 140)
+
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        logger.exception("Trades command failed")
+        raise typer.Exit(code=1)
 
 
 @app.command()
