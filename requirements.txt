@@ -5,3 +5,7 @@ pydantic-settings
 httpx
 duckdb
 chromadb
+pytest
+pytest-asyncio
+pytest-cov
+ruff

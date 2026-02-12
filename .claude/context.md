@@ -28,18 +28,18 @@ Python 3.11+, Ollama, ChromaDB, DuckDB, SQLite, Typer, Loguru, Pydantic, httpx, 
 
 ## Architecture
 
-Layer 1 (Data): NewsAgent + MarketAgent + SocialAgent + DataAgent -> ChromaDB
+Layer 1 (Data): NewsAgent + MarketAgent + SocialAgent (Hacker News) + DataAgent -> ChromaDB
 Layer 2 (Reasoning): BullAgent vs BearAgent vs Devil's Advocate -> JudgeAgent -> P(YES)
 Layer 3 (Calibration): Isotonic regression + Edge detection
 Layer 4 (Execution): Kelly sizing -> Risk checks -> Polymarket CLOB API
 
 ## Approved Free APIs
 
-Polymarket CLOB/Gamma (unlimited), NewsAPI (100/day), Google News RSS (unlimited), Reddit (100/min)
+Polymarket CLOB/Gamma (unlimited), NewsAPI (100/day), Google News RSS (unlimited), Hacker News API (unlimited)
 
 ## Forbidden
 
-OpenAI API, Anthropic API, Twitter/X API, any paid service, models >14B params
+OpenAI API, Anthropic API, Twitter/X API, Reddit API (registration issues), any paid service, models >14B params
 
 ## Risk Limits (50 EUR)
 
