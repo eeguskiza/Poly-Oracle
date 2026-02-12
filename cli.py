@@ -1,13 +1,16 @@
+import asyncio
 import httpx
 import typer
 from loguru import logger
 
 from config.settings import get_settings
 from src.utils.logging import setup_logging
-from src.utils.exceptions import ConfigError
+from src.utils.exceptions import ConfigError, DataFetchError, MarketNotFoundError
 from src.data.storage.duckdb_client import DuckDBClient
 from src.data.storage.sqlite_client import SQLiteClient
 from src.data.storage.chroma_client import ChromaClient
+from src.data.sources.polymarket import PolymarketClient
+from src.models import MarketFilter
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -153,9 +156,103 @@ def status() -> None:
 
 
 @app.command()
-def markets() -> None:
-    """List active markets."""
-    typer.echo("Command not yet implemented")
+def markets(
+    limit: int = typer.Option(20, help="Number of markets to fetch"),
+    min_liquidity: float = typer.Option(1000, help="Minimum liquidity filter"),
+    market_type: str = typer.Option(None, help="Filter by market type"),
+) -> None:
+    """List active Polymarket markets."""
+    try:
+        settings = get_settings()
+        setup_logging(settings.log_level, settings.database.db_dir / "logs")
+
+        async def fetch_markets() -> None:
+            async with PolymarketClient() as client:
+                filter_obj = MarketFilter(
+                    min_liquidity=min_liquidity,
+                    market_types=[market_type] if market_type else None,
+                )
+
+                market_list = await client.filter_markets(filter_obj)
+                market_list = market_list[:limit]
+
+                if not market_list:
+                    typer.echo("No markets found matching criteria")
+                    return
+
+                typer.echo(f"\nActive Markets (showing {len(market_list)}):")
+                typer.echo("=" * 120)
+                typer.echo(
+                    f"{'Question':<50} | {'Price':<8} | {'Volume':<12} | {'Liquidity':<12} | {'Days Left':<10}"
+                )
+                typer.echo("=" * 120)
+
+                for market in market_list:
+                    question = market.question[:47] + "..." if len(market.question) > 50 else market.question
+                    price_str = f"{market.current_price:.3f}"
+                    volume_str = f"${market.volume_24h:,.0f}"
+                    liquidity_str = f"${market.liquidity:,.0f}"
+                    days_str = f"{market.days_until_resolution:.1f}"
+
+                    typer.echo(
+                        f"{question:<50} | {price_str:<8} | {volume_str:<12} | {liquidity_str:<12} | {days_str:<10}"
+                    )
+
+        asyncio.run(fetch_markets())
+
+    except DataFetchError as e:
+        typer.echo(f"Failed to fetch markets: {e}", err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        logger.exception("Markets command failed")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def market(market_id: str) -> None:
+    """Show details for a specific market."""
+    try:
+        settings = get_settings()
+        setup_logging(settings.log_level, settings.database.db_dir / "logs")
+
+        async def fetch_market() -> None:
+            async with PolymarketClient() as client:
+                try:
+                    m = await client.get_market(market_id)
+
+                    typer.echo("\nMarket Details:")
+                    typer.echo("=" * 80)
+                    typer.echo(f"ID: {m.id}")
+                    typer.echo(f"Question: {m.question}")
+                    typer.echo(f"Description: {m.description}")
+                    typer.echo(f"Type: {m.market_type}")
+                    typer.echo("")
+                    typer.echo(f"Current Price: {m.current_price:.3f}")
+                    typer.echo(f"24h Volume: ${m.volume_24h:,.2f}")
+                    typer.echo(f"Liquidity: ${m.liquidity:,.2f}")
+                    typer.echo("")
+                    typer.echo(f"Created: {m.created_at.strftime('%Y-%m-%d %H:%M UTC')}")
+                    typer.echo(f"Resolves: {m.resolution_date.strftime('%Y-%m-%d %H:%M UTC')}")
+                    typer.echo(f"Days until resolution: {m.days_until_resolution:.1f}")
+                    typer.echo("")
+                    typer.echo(f"Outcomes: {', '.join(m.outcomes)}")
+
+                except MarketNotFoundError:
+                    typer.echo(f"Market {market_id} not found", err=True)
+                    raise typer.Exit(code=1)
+
+        asyncio.run(fetch_market())
+
+    except DataFetchError as e:
+        typer.echo(f"Failed to fetch market: {e}", err=True)
+        raise typer.Exit(code=1)
+    except typer.Exit:
+        raise
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        logger.exception("Market command failed")
+        raise typer.Exit(code=1)
 
 
 @app.command()
