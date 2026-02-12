@@ -134,6 +134,20 @@ class PolymarketClient:
                     outcomes[1]: token_ids_list[1] if len(token_ids_list) > 1 else ""
                 }
 
+            if "endDate" in data and data["endDate"]:
+                resolution_date = datetime.fromisoformat(
+                    data["endDate"].replace("Z", "+00:00")
+                )
+            else:
+                resolution_date = datetime.now(timezone.utc) + timedelta(days=365)
+                logger.debug(f"Market {data.get('id', 'unknown')} missing endDate, using default")
+
+            created_at = datetime.now(timezone.utc)
+            if "createdAt" in data and data["createdAt"]:
+                created_at = datetime.fromisoformat(
+                    data["createdAt"].replace("Z", "+00:00")
+                )
+
             return Market(
                 id=data["id"],
                 question=data["question"],
@@ -142,17 +156,14 @@ class PolymarketClient:
                 current_price=current_price,
                 volume_24h=float(data.get("volume24hr", 0)),
                 liquidity=float(data.get("liquidityNum", 0)),
-                resolution_date=datetime.fromisoformat(
-                    data["endDate"].replace("Z", "+00:00")
-                ),
-                created_at=datetime.fromisoformat(
-                    data["createdAt"].replace("Z", "+00:00")
-                ) if "createdAt" in data else datetime.now(timezone.utc),
+                resolution_date=resolution_date,
+                created_at=created_at,
                 outcomes=outcomes,
                 token_ids=token_ids,
             )
         except (KeyError, ValueError, TypeError) as e:
-            logger.error(f"Failed to parse market data: {e}")
+            market_id = data.get("id", "unknown")
+            logger.error(f"Failed to parse market {market_id}: {e}")
             raise DataFetchError(
                 f"Invalid market data format: {e}",
                 source="Polymarket",

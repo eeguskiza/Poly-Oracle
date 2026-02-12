@@ -19,6 +19,7 @@ from src.models.debate import (
     AgentResponse,
     DebateResult,
 )
+from src.models.news import NewsItem
 
 __all__ = [
     "Market",
@@ -38,4 +39,5 @@ __all__ = [
     "DebateConfig",
     "AgentResponse",
     "DebateResult",
+    "NewsItem",
 ]

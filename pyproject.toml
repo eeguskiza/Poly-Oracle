@@ -15,6 +15,7 @@ dependencies = [
     "httpx",
     "duckdb",
     "chromadb",
+    "feedparser",
 ]
 
 [project.optional-dependencies]

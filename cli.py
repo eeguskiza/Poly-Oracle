@@ -10,6 +10,7 @@ from src.data.storage.duckdb_client import DuckDBClient
 from src.data.storage.sqlite_client import SQLiteClient
 from src.data.storage.chroma_client import ChromaClient
 from src.data.sources.polymarket import PolymarketClient
+from src.data.sources.news import NewsClient
 from src.models import MarketFilter
 
 app = typer.Typer(no_args_is_help=True)
@@ -252,6 +253,106 @@ def market(market_id: str) -> None:
     except Exception as e:
         typer.echo(f"Error: {e}", err=True)
         logger.exception("Market command failed")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def news(
+    query: str = typer.Argument(..., help="Search query for news"),
+    limit: int = typer.Option(10, help="Number of news items to fetch"),
+) -> None:
+    """Search for news articles."""
+    try:
+        settings = get_settings()
+        setup_logging(settings.log_level, settings.database.db_dir / "logs")
+
+        async def fetch_news() -> None:
+            async with NewsClient() as client:
+                news_items = await client.search_news(query, max_results=limit)
+
+                if not news_items:
+                    typer.echo("No news found matching query")
+                    return
+
+                typer.echo(f"\nNews Results (showing {len(news_items)}):")
+                typer.echo("=" * 120)
+                typer.echo(
+                    f"{'Date':<20} | {'Source':<25} | {'Sentiment':<10} | {'Title':<50}"
+                )
+                typer.echo("=" * 120)
+
+                for item in news_items:
+                    date_str = item.published_at.strftime("%Y-%m-%d %H:%M")
+                    source = item.source[:22] + "..." if len(item.source) > 25 else item.source
+                    sentiment_str = f"{item.sentiment:+.2f}"
+
+                    title = item.title[:47] + "..." if len(item.title) > 50 else item.title
+
+                    typer.echo(
+                        f"{date_str:<20} | {source:<25} | {sentiment_str:<10} | {title:<50}"
+                    )
+
+        asyncio.run(fetch_news())
+
+    except DataFetchError as e:
+        typer.echo(f"Failed to fetch news: {e}", err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        logger.exception("News command failed")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def market_news(market_id: str) -> None:
+    """Get news relevant to a specific market."""
+    try:
+        settings = get_settings()
+        setup_logging(settings.log_level, settings.database.db_dir / "logs")
+
+        async def fetch_market_news() -> None:
+            async with PolymarketClient() as poly_client:
+                market = await poly_client.get_market(market_id)
+
+                typer.echo(f"\nMarket: {market.question}")
+                typer.echo("=" * 120)
+
+                async with NewsClient() as news_client:
+                    news_items = await news_client.get_market_news(market, max_results=10)
+
+                    if not news_items:
+                        typer.echo("No relevant news found for this market")
+                        return
+
+                    typer.echo(f"\nRelevant News (showing {len(news_items)}):")
+                    typer.echo("=" * 120)
+                    typer.echo(
+                        f"{'Date':<20} | {'Source':<25} | {'Relevance':<10} | {'Sentiment':<10} | {'Title':<40}"
+                    )
+                    typer.echo("=" * 120)
+
+                    for item in news_items:
+                        date_str = item.published_at.strftime("%Y-%m-%d %H:%M")
+                        source = item.source[:22] + "..." if len(item.source) > 25 else item.source
+                        relevance_str = f"{item.relevance_score:.2f}"
+                        sentiment_str = f"{item.sentiment:+.2f}"
+                        title = item.title[:37] + "..." if len(item.title) > 40 else item.title
+
+                        typer.echo(
+                            f"{date_str:<20} | {source:<25} | {relevance_str:<10} | {sentiment_str:<10} | {title:<40}"
+                        )
+
+        asyncio.run(fetch_market_news())
+
+    except MarketNotFoundError:
+        typer.echo(f"Market {market_id} not found", err=True)
+        raise typer.Exit(code=1)
+    except DataFetchError as e:
+        typer.echo(f"Failed to fetch data: {e}", err=True)
+        raise typer.Exit(code=1)
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        logger.exception("Market news command failed")
         raise typer.Exit(code=1)
 
 
