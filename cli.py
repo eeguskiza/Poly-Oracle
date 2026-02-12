@@ -5,6 +5,9 @@ from loguru import logger
 from config.settings import get_settings
 from src.utils.logging import setup_logging
 from src.utils.exceptions import ConfigError
+from src.data.storage.duckdb_client import DuckDBClient
+from src.data.storage.sqlite_client import SQLiteClient
+from src.data.storage.chroma_client import ChromaClient
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -23,9 +26,21 @@ def init() -> None:
         typer.echo(f"Created directory: {settings.database.db_dir}")
         typer.echo(f"Created directory: {settings.database.db_dir / 'logs'}")
         typer.echo(f"Created directory: {settings.database.chroma_path}")
-        typer.echo("Poly-Oracle initialized successfully")
 
-        logger.info("Poly-Oracle directories initialized")
+        with DuckDBClient(settings.database.duckdb_path) as duckdb_client:
+            duckdb_client.initialize_schema()
+            typer.echo("Initialized DuckDB schema")
+
+        with SQLiteClient(settings.database.sqlite_path) as sqlite_client:
+            sqlite_client.initialize_schema()
+            typer.echo("Initialized SQLite schema")
+
+        with ChromaClient(settings.database.chroma_path, settings.llm.embedding_model) as chroma_client:
+            chroma_client.initialize_collections()
+            typer.echo("Initialized ChromaDB collections")
+
+        typer.echo("Poly-Oracle initialized successfully")
+        logger.info("Poly-Oracle directories and databases initialized")
 
     except Exception as e:
         typer.echo(f"Initialization failed: {e}", err=True)
@@ -88,6 +103,44 @@ def status() -> None:
             settings.polymarket.api_passphrase
         ]) else "NO"
         typer.echo(f"Polymarket API configured: {has_polymarket}")
+        typer.echo("")
+
+        typer.echo("Database Status:")
+        duckdb_exists = settings.database.duckdb_path.exists()
+        typer.echo(f"DuckDB: {'EXISTS' if duckdb_exists else 'NOT FOUND'}")
+
+        if duckdb_exists:
+            try:
+                with DuckDBClient(settings.database.duckdb_path) as duckdb_client:
+                    stats = duckdb_client.get_calibration_stats()
+                    typer.echo(f"  Forecasts: {stats['overall']['count']}")
+            except Exception:
+                typer.echo(f"  Forecasts: ERROR")
+
+        sqlite_exists = settings.database.sqlite_path.exists()
+        typer.echo(f"SQLite: {'EXISTS' if sqlite_exists else 'NOT FOUND'}")
+
+        if sqlite_exists:
+            try:
+                with SQLiteClient(settings.database.sqlite_path) as sqlite_client:
+                    positions = sqlite_client.get_open_positions()
+                    typer.echo(f"  Open positions: {len(positions)}")
+            except Exception:
+                typer.echo(f"  Open positions: ERROR")
+
+        chroma_exists = settings.database.chroma_path.exists()
+        typer.echo(f"ChromaDB: {'EXISTS' if chroma_exists else 'NOT FOUND'}")
+
+        if chroma_exists:
+            try:
+                with ChromaClient(settings.database.chroma_path, settings.llm.embedding_model) as chroma_client:
+                    stats = chroma_client.get_collection_stats()
+                    total_docs = sum(stats.values())
+                    typer.echo(f"  Total documents: {total_docs}")
+                    for collection, count in stats.items():
+                        typer.echo(f"    {collection}: {count}")
+            except Exception:
+                typer.echo(f"  Total documents: ERROR")
 
         logger.info("Status check completed")
 

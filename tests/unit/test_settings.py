@@ -35,7 +35,6 @@ def test_risk_settings_defaults() -> None:
 
 def test_data_settings_defaults() -> None:
     data = DataSettings()
-    assert data.newsapi_key is None
     assert data.cache_ttl_news == 3600
     assert data.cache_ttl_market_list == 300
     assert data.cache_ttl_market_detail == 60
@@ -43,9 +42,6 @@ def test_data_settings_defaults() -> None:
 
 def test_polymarket_settings_defaults() -> None:
     poly = PolymarketSettings()
-    assert poly.api_key is None
-    assert poly.api_secret is None
-    assert poly.api_passphrase is None
     assert poly.clob_url == "https://clob.polymarket.com"
     assert poly.gamma_url == "https://gamma-api.polymarket.com"
 

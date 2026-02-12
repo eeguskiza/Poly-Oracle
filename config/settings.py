@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class LLMSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="OLLAMA_")
+    model_config = SettingsConfigDict(env_prefix="OLLAMA_", env_file=".env", extra="ignore")
 
     model: str = Field(default="mistral", alias="OLLAMA_MODEL")
     base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
@@ -18,7 +18,7 @@ class LLMSettings(BaseSettings):
 
 
 class RiskSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="")
+    model_config = SettingsConfigDict(env_prefix="", env_file=".env", extra="ignore")
 
     initial_bankroll: float = Field(default=50, alias="INITIAL_BANKROLL")
     max_position_pct: float = Field(default=0.10, alias="MAX_POSITION_PCT")
@@ -32,7 +32,7 @@ class RiskSettings(BaseSettings):
 
 
 class DataSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="")
+    model_config = SettingsConfigDict(env_prefix="", env_file=".env", extra="ignore")
 
     newsapi_key: Optional[str] = Field(default=None, alias="NEWSAPI_KEY")
     cache_ttl_news: int = 3600
@@ -41,7 +41,7 @@ class DataSettings(BaseSettings):
 
 
 class PolymarketSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="POLYMARKET_")
+    model_config = SettingsConfigDict(env_prefix="POLYMARKET_", env_file=".env", extra="ignore")
 
     api_key: Optional[str] = Field(default=None, alias="POLYMARKET_API_KEY")
     api_secret: Optional[str] = Field(default=None, alias="POLYMARKET_API_SECRET")
@@ -51,7 +51,7 @@ class PolymarketSettings(BaseSettings):
 
 
 class DatabaseSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="")
+    model_config = SettingsConfigDict(env_prefix="", env_file=".env", extra="ignore")
 
     db_dir: Path = Field(default=Path("db"), alias="DB_DIR")
 
