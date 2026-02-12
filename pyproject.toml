@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_backend"
+
+[project]
+name = "poly-oracle"
+version = "0.1.0"
+description = "Multi-agent forecasting system for Polymarket prediction markets"
+requires-python = ">=3.11"
+dependencies = [
+    "typer",
+    "loguru",
+    "pydantic",
+    "pydantic-settings",
+    "httpx",
+    "duckdb",
+    "chromadb",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "ruff",
+]
+
+[project.scripts]
+poly-oracle = "cli:app"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
