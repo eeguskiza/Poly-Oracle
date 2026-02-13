@@ -1,7 +1,6 @@
 """
 Feedback Loop - Records forecasts and processes resolutions for calibration.
 """
-from datetime import datetime, timezone
 from loguru import logger
 
 from src.data.storage.duckdb_client import DuckDBClient
@@ -112,8 +111,30 @@ class FeedbackLoop:
         logger.info(f"Processing resolution for market {market_id}: outcome={outcome}")
 
         try:
-            # Get forecast for this market
+            # Keep backward compatibility with existing tests/mocks that
+            # expect this lookup path.
             forecast = self.db.get_forecast(market_id)
+
+            # In production, market resolution passes market_id (not row id),
+            # so we also support fetching by market_id from DuckDB.
+            if not forecast:
+                try:
+                    forecast_row = self.db.conn.execute(
+                        """
+                        SELECT *
+                        FROM forecasts
+                        WHERE market_id = ?
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """,
+                        [market_id],
+                    ).fetchone()
+
+                    if forecast_row and isinstance(forecast_row, tuple):
+                        columns = [desc[0] for desc in self.db.conn.description]
+                        forecast = dict(zip(columns, forecast_row))
+                except Exception:
+                    forecast = None
 
             if not forecast:
                 logger.warning(f"No forecast found for market {market_id}")
@@ -122,24 +143,23 @@ class FeedbackLoop:
                     "error": "Forecast not found",
                 }
 
+            raw_prob = forecast.get("raw_probability", 0.5)
+            cal_prob = forecast.get("calibrated_probability", raw_prob)
+
             # Convert outcome to integer
             outcome_int = 1 if outcome else 0
 
             # Calculate Brier scores
-            raw_prob = forecast.get("raw_probability", 0.5)
-            cal_prob = forecast.get("calibrated_probability", raw_prob)
-
             brier_score_raw = (raw_prob - outcome_int) ** 2
             brier_score_calibrated = (cal_prob - outcome_int) ** 2
 
-            # Update forecast with outcome and Brier score
+            # Update unresolved forecasts for this market with outcome and Brier score
             update_query = """
                 UPDATE forecasts
                 SET
+                    resolved = true,
                     outcome = ?,
-                    brier_score = ?,
-                    brier_score_raw = ?,
-                    resolved_at = ?
+                    brier_score = ?
                 WHERE market_id = ?
             """
 
@@ -148,8 +168,6 @@ class FeedbackLoop:
                 [
                     outcome_int,
                     brier_score_calibrated,
-                    brier_score_raw,
-                    datetime.now(timezone.utc).isoformat(),
                     market_id,
                 ],
             )

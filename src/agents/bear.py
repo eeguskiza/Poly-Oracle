@@ -31,6 +31,7 @@ class BearAgent(BaseAgent):
         instruction: str,
         phase: str = "initial_argument",
         previous_arguments: list[dict[str, str]] | None = None,
+        **kwargs,
     ) -> str:
         """
         Build prompt with phase-specific instructions.

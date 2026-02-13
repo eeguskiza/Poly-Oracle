@@ -124,6 +124,34 @@ async def test_ollama_list_models() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ollama_can_generate() -> None:
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.aclose = AsyncMock()
+        mock_client_class.return_value = mock_client
+
+        ollama = OllamaClient(base_url="http://localhost:11434", model="mistral")
+        ollama.generate = AsyncMock(return_value="OK")
+
+        assert await ollama.can_generate() is True
+
+
+@pytest.mark.asyncio
+async def test_ollama_can_generate_failure() -> None:
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client.aclose = AsyncMock()
+        mock_client_class.return_value = mock_client
+
+        ollama = OllamaClient(base_url="http://localhost:11434", model="mistral")
+        ollama.generate = AsyncMock(
+            side_effect=LLMError("generation failed", model="mistral")
+        )
+
+        assert await ollama.can_generate() is False
+
+
+@pytest.mark.asyncio
 async def test_ollama_generate_error() -> None:
     with patch("httpx.AsyncClient") as mock_client_class:
         mock_client = AsyncMock()

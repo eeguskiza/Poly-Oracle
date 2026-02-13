@@ -64,6 +64,7 @@ def duckdb_client(temp_db_dir):
     """Initialize DuckDB client with temp database."""
     db_path = temp_db_dir / "test.duckdb"
     client = DuckDBClient(db_path)
+    client.initialize_schema()
     yield client
     client.close()
 
@@ -162,9 +163,9 @@ async def test_full_pipeline_success(
 
     # Step 6: Analyze edge
     edge_analysis = analyzer.analyze(
-        our_forecast=calibrated_prob,
+        our_forecast=calibrated_forecast,
         market_price=sample_market.current_price,  # 0.40
-        market=sample_market,
+        liquidity=sample_market.liquidity,
     )
 
     assert edge_analysis.has_actionable_edge
@@ -288,7 +289,11 @@ async def test_full_pipeline_losing_trade(
         confidence=0.75,
     )
     calibrated_prob = calibrated_forecast.calibrated
-    edge_analysis = analyzer.analyze(calibrated_prob, sample_market.current_price, sample_market)
+    edge_analysis = analyzer.analyze(
+        calibrated_forecast,
+        sample_market.current_price,
+        sample_market.liquidity,
+    )
 
     bankroll = sqlite_client.get_current_bankroll()
     execution_result = await executor.execute(

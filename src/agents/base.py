@@ -126,6 +126,29 @@ class OllamaClient:
             logger.error(f"Failed to list models: {e}")
             return []
 
+    async def can_generate(self) -> bool:
+        """
+        Run a minimal generation request as a health check.
+
+        This catches cases where `/api/tags` works but `/api/generate` fails.
+        """
+        try:
+            await self.generate(
+                prompt="Reply with exactly: OK",
+                temperature=0.0,
+                max_tokens=8,
+            )
+            logger.debug(f"Model {self.model} passed generation health check")
+            return True
+        except LLMError as e:
+            logger.warning(f"Model {self.model} failed generation health check: {e}")
+            return False
+        except Exception as e:
+            logger.warning(
+                f"Unexpected generation health check failure for model {self.model}: {e}"
+            )
+            return False
+
     async def close(self) -> None:
         await self.client.aclose()
         logger.info("OllamaClient closed")

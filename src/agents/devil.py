@@ -30,6 +30,7 @@ class DevilsAdvocateAgent(BaseAgent):
         context: str,
         instruction: str,
         previous_arguments: list[dict[str, str]] | None = None,
+        **kwargs,
     ) -> str:
         """
         Build prompt for critique.

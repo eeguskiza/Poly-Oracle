@@ -1,6 +1,7 @@
 """
 Market Resolver - Automatically resolves markets and calculates P&L.
 """
+import inspect
 from datetime import datetime, timezone
 from typing import Any
 from loguru import logger
@@ -178,6 +179,8 @@ class MarketResolver:
             self.sqlite.upsert_daily_stats(stats)
 
         # Process resolution through feedback loop for calibration
-        await self.feedback.process_resolution(market_id, outcome)
+        resolution_result = self.feedback.process_resolution(market_id, outcome)
+        if inspect.isawaitable(resolution_result):
+            await resolution_result
 
         return pnl

@@ -1,3 +1,39 @@
+import os
+import sys
+from pathlib import Path
+
+
+def _reexec_with_local_venv() -> None:
+    """
+    Re-executes CLI with project virtualenv python when available.
+
+    This keeps `python cli.py ...` working even if the shell did not activate
+    the local virtualenv first.
+    """
+    project_root = Path(__file__).resolve().parent
+    venv_dir = project_root / "venv"
+    venv_python = venv_dir / "bin" / "python"
+
+    if os.environ.get("POLY_ORACLE_NO_REEXEC") == "1":
+        return
+    if not venv_python.exists():
+        return
+
+    # If we are already running inside this venv, no re-exec needed.
+    if Path(sys.prefix).resolve() == venv_dir.resolve():
+        return
+
+    env = os.environ.copy()
+    env["POLY_ORACLE_NO_REEXEC"] = "1"
+    os.execve(
+        str(venv_python),
+        [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
+        env,
+    )
+
+
+_reexec_with_local_venv()
+
 import asyncio
 import httpx
 import typer
@@ -176,8 +212,16 @@ def markets(
     limit: int = typer.Option(20, help="Number of markets to fetch"),
     min_liquidity: float = typer.Option(1000, help="Minimum liquidity filter"),
     market_type: str = typer.Option(None, help="Filter by market type"),
+    sort_by: str = typer.Option("volume", help="Sort by: volume, liquidity, or trending"),
 ) -> None:
-    """List active Polymarket markets."""
+    """
+    List active Polymarket markets.
+
+    --sort-by options:
+    - volume: Sort by 24h trading volume (most active)
+    - liquidity: Sort by total liquidity
+    - trending: Sort by volume/liquidity ratio (best for finding hot markets)
+    """
     try:
         settings = get_settings()
         setup_logging(settings.log_level, settings.database.db_dir / "logs")
@@ -190,6 +234,16 @@ def markets(
                 )
 
                 market_list = await client.filter_markets(filter_obj)
+
+                # Sort based on user preference
+                if sort_by == "volume":
+                    market_list.sort(key=lambda m: m.volume_24h, reverse=True)
+                elif sort_by == "liquidity":
+                    market_list.sort(key=lambda m: m.liquidity, reverse=True)
+                elif sort_by == "trending":
+                    # Trending = high volume relative to liquidity
+                    market_list.sort(key=lambda m: m.volume_24h / max(m.liquidity, 1), reverse=True)
+
                 market_list = market_list[:limit]
 
                 if not market_list:
@@ -765,6 +819,7 @@ def paper(
     import asyncio
     import time
     from src.agents import create_debate_system
+    from src.agents.base import OllamaClient
     from src.data.sources.polymarket import PolymarketClient
     from src.data.sources.news import NewsClient
     from src.data.context import ContextBuilder
@@ -774,12 +829,37 @@ def paper(
     from src.calibration import CalibratorAgent, MetaAnalyzer, FeedbackLoop
     from src.calibration.resolver import MarketResolver
     from src.execution import PositionSizer, RiskManager, PaperTradingExecutor
+    from src.utils.exceptions import LLMError
 
     settings = get_settings()
+
+    async def check_llm_health() -> tuple[bool, str]:
+        """
+        Verify Ollama has the configured model and can serve generations.
+        """
+        async with OllamaClient(
+            base_url=settings.llm.base_url,
+            model=settings.llm.model,
+            timeout=30,
+        ) as test_ollama:
+            if not await test_ollama.is_available():
+                return False, f"Ollama model '{settings.llm.model}' is not available."
+
+            if not await test_ollama.can_generate():
+                return (
+                    False,
+                    f"Ollama model '{settings.llm.model}' failed generation health check.",
+                )
+
+        return True, ""
 
     async def run_cycle() -> None:
         """Run one complete trading cycle."""
         cycle_start = time.time()
+        trades_attempted = 0
+        trades_executed = 0
+        trades_skipped = 0
+        target_markets = []
 
         typer.echo("\n" + "=" * 80)
         typer.echo(f"PAPER TRADING CYCLE - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -833,119 +913,127 @@ def paper(
                     risk=risk_manager,
                 )
 
-                # PHASE 2: Find new trading opportunities
-                typer.echo(f"\nPHASE 2: Fetching active markets...")
+                llm_ready, llm_error = await check_llm_health()
+                if not llm_ready:
+                    typer.echo("\nPHASE 2: Skipping market analysis (LLM unavailable)")
+                    typer.echo(f"Reason: {llm_error}")
+                    typer.echo(
+                        f"Recovery: run 'ollama serve' and "
+                        f"'ollama pull {settings.llm.model}'"
+                    )
+                else:
+                    # PHASE 2: Find new trading opportunities
+                    typer.echo(f"\nPHASE 2: Fetching active markets...")
 
-                markets = await poly_client.get_active_markets()
+                    markets = await poly_client.get_active_markets()
 
-                # Filter by liquidity
-                filtered_markets = [
-                    m for m in markets
-                    if m.liquidity >= settings.risk.min_liquidity
-                ]
+                    # Filter by liquidity
+                    filtered_markets = [
+                        m for m in markets
+                        if m.liquidity >= settings.risk.min_liquidity
+                    ]
 
-                # Sort by liquidity and take top N
-                filtered_markets.sort(key=lambda m: m.liquidity, reverse=True)
-                target_markets = filtered_markets[:top_markets]
+                    # Sort by liquidity and take top N
+                    filtered_markets.sort(key=lambda m: m.liquidity, reverse=True)
+                    target_markets = filtered_markets[:top_markets]
 
-                typer.echo(
-                    f"Found {len(markets)} active markets, "
-                    f"{len(filtered_markets)} with sufficient liquidity, "
-                    f"analyzing top {len(target_markets)}"
-                )
+                    typer.echo(
+                        f"Found {len(markets)} active markets, "
+                        f"{len(filtered_markets)} with sufficient liquidity, "
+                        f"analyzing top {len(target_markets)}"
+                    )
 
-                trades_attempted = 0
-                trades_executed = 0
-                trades_skipped = 0
-
-                # Process each market
-                for idx, market in enumerate(target_markets, 1):
-                    typer.echo(f"\n[{idx}/{len(target_markets)}] Analyzing {market.question[:60]}...")
-                    typer.echo(f"  Liquidity: ${market.liquidity:,.0f} | Price: {market.current_price:.1%}")
-
-                    try:
-                        # Build context
-                        with ChromaClient(settings.database.chroma_path, settings.llm.embedding_model) as chroma_client:
-                            builder = ContextBuilder(
-                                polymarket_client=poly_client,
-                                news_client=news_client,
-                                chroma_client=chroma_client,
-                            )
-                            context_text = await builder.build_context(market)
-
-                        # Create debate system and run forecast
-                        orchestrator, ollama = create_debate_system(
-                            base_url=settings.llm.base_url,
-                            model=settings.llm.model,
-                            timeout=120,
-                        )
+                    # Process each market
+                    for idx, market in enumerate(target_markets, 1):
+                        typer.echo(f"\n[{idx}/{len(target_markets)}] Analyzing {market.question[:60]}...")
+                        typer.echo(f"  Liquidity: ${market.liquidity:,.0f} | Price: {market.current_price:.1%}")
 
                         try:
-                            forecast_result = await orchestrator.run_debate(
-                                market_id=market.id,
-                                context=context_text,
-                                rounds=1,  # Use 1 round for faster cycles
-                                temperature=0.7,
-                                verbose=False,
+                            # Build context
+                            with ChromaClient(settings.database.chroma_path, settings.llm.embedding_model) as chroma_client:
+                                builder = ContextBuilder(
+                                    polymarket_client=poly_client,
+                                    news_client=news_client,
+                                    chroma_client=chroma_client,
+                                )
+                                context_text = await builder.build_context(market)
+
+                            # Create debate system and run forecast
+                            orchestrator, ollama = create_debate_system(
+                                base_url=settings.llm.base_url,
+                                model=settings.llm.model,
+                                timeout=120,
                             )
 
-                            # Calibrate forecast
-                            confidence = 0.5
-                            if forecast_result.confidence_lower and forecast_result.confidence_upper:
-                                confidence = 1.0 - (forecast_result.confidence_upper - forecast_result.confidence_lower)
-
-                            calibrated = calibrator.calibrate(
-                                raw_forecast=forecast_result.probability,
-                                market_type=market.market_type,
-                                confidence=confidence,
-                            )
-
-                            # Analyze edge
-                            edge_analysis = analyzer.analyze(
-                                our_forecast=calibrated,
-                                market_price=market.current_price,
-                                liquidity=market.liquidity,
-                            )
-
-                            typer.echo(f"  Forecast: {calibrated.calibrated:.1%} (raw: {forecast_result.probability:.1%})")
-                            typer.echo(f"  Edge: {edge_analysis.raw_edge:+.1%} | Recommendation: {edge_analysis.recommended_action}")
-
-                            # Record forecast
-                            feedback.record_forecast(
-                                forecast=forecast_result,
-                                market=market,
-                                calibrated_probability=calibrated.calibrated,
-                                edge=edge_analysis.raw_edge,
-                                recommended_action=edge_analysis.recommended_action,
-                            )
-
-                            # Attempt execution
-                            if edge_analysis.recommended_action == "TRADE":
-                                trades_attempted += 1
-
-                                execution_result = await executor.execute(
-                                    edge_analysis=edge_analysis,
-                                    calibrated_probability=calibrated.calibrated,
-                                    market=market,
-                                    bankroll=bankroll,
+                            try:
+                                forecast_result = await orchestrator.run_debate(
+                                    market_id=market.id,
+                                    context=context_text,
+                                    rounds=1,  # Use 1 round for faster cycles
+                                    temperature=0.7,
+                                    verbose=False,
                                 )
 
-                                if execution_result and execution_result.success:
-                                    trades_executed += 1
-                                    typer.echo(f"  ✓ Trade executed: {execution_result.message}")
-                                elif execution_result:
-                                    typer.echo(f"  ✗ Trade rejected: {execution_result.message}")
+                                # Calibrate forecast
+                                confidence = 0.5
+                                if forecast_result.confidence_lower and forecast_result.confidence_upper:
+                                    confidence = 1.0 - (forecast_result.confidence_upper - forecast_result.confidence_lower)
+
+                                calibrated = calibrator.calibrate(
+                                    raw_forecast=forecast_result.probability,
+                                    market_type=market.market_type,
+                                    confidence=confidence,
+                                )
+
+                                # Analyze edge
+                                edge_analysis = analyzer.analyze(
+                                    our_forecast=calibrated,
+                                    market_price=market.current_price,
+                                    liquidity=market.liquidity,
+                                )
+
+                                typer.echo(f"  Forecast: {calibrated.calibrated:.1%} (raw: {forecast_result.probability:.1%})")
+                                typer.echo(f"  Edge: {edge_analysis.raw_edge:+.1%} | Recommendation: {edge_analysis.recommended_action}")
+
+                                # Record forecast
+                                feedback.record_forecast(
+                                    forecast=forecast_result,
+                                    market=market,
+                                    calibrated_probability=calibrated.calibrated,
+                                    edge=edge_analysis.raw_edge,
+                                    recommended_action=edge_analysis.recommended_action,
+                                )
+
+                                # Attempt execution
+                                if edge_analysis.recommended_action == "TRADE":
+                                    trades_attempted += 1
+
+                                    execution_result = await executor.execute(
+                                        edge_analysis=edge_analysis,
+                                        calibrated_probability=calibrated.calibrated,
+                                        market=market,
+                                        bankroll=bankroll,
+                                    )
+
+                                    if execution_result and execution_result.success:
+                                        trades_executed += 1
+                                        typer.echo(f"  ✓ Trade executed: {execution_result.message}")
+                                    elif execution_result:
+                                        typer.echo(f"  ✗ Trade rejected: {execution_result.message}")
+                                    else:
+                                        typer.echo(f"  ○ Trade skipped (insufficient size)")
                                 else:
-                                    typer.echo(f"  ○ Trade skipped (insufficient size)")
-                            else:
-                                trades_skipped += 1
+                                    trades_skipped += 1
 
-                        finally:
-                            await ollama.close()
+                            finally:
+                                await ollama.close()
 
-                    except Exception as e:
-                        typer.echo(f"  ✗ Error processing market: {e}")
-                        logger.exception(f"Error processing market {market.id}")
+                        except LLMError as e:
+                            typer.echo(f"  ✗ LLM error processing market: {e}")
+                            logger.error(f"LLM error processing market {market.id}: {e}")
+                        except Exception as e:
+                            typer.echo(f"  ✗ Error processing market: {e}")
+                            logger.error(f"Error processing market {market.id}: {e}")
 
             # Cycle summary
             cycle_duration = time.time() - cycle_start

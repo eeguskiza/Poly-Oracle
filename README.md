@@ -38,7 +38,10 @@ python cli.py status
 - `python cli.py status` - Check system status and configuration
 
 ### Market Discovery
-- `python cli.py markets [--limit N]` - List active Polymarket markets (default: 20)
+- `python cli.py markets [--limit N] [--sort-by volume|liquidity|trending]` - List active markets
+  - `--sort-by trending` (default) - Shows markets with highest volume/liquidity ratio (most active)
+  - `--sort-by volume` - Shows markets with highest 24h trading volume
+  - `--sort-by liquidity` - Shows markets with highest total liquidity
 - `python cli.py market <market_id>` - Show details for a specific market
 
 ### News & Context
