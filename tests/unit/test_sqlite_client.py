@@ -31,13 +31,11 @@ def test_initialize_schema(tmp_path: Path) -> None:
 def test_insert_trade(sqlite_client: SQLiteClient) -> None:
     trade = {
         "market_id": "market_123",
-        "forecast_id": "forecast_456",
         "timestamp": "2026-02-12T10:00:00",
-        "direction": "YES",
+        "direction": "BUY_YES",
         "amount_usd": 5.0,
-        "price": 0.6,
-        "shares": 8.33,
-        "order_type": "LIMIT",
+        "num_shares": 8.33,
+        "entry_price": 0.6,
         "status": "PENDING",
     }
 
@@ -52,55 +50,29 @@ def test_insert_trade(sqlite_client: SQLiteClient) -> None:
     assert dict(row)["status"] == "PENDING"
 
 
-def test_update_trade_status(sqlite_client: SQLiteClient) -> None:
-    trade = {
-        "market_id": "market_123",
-        "forecast_id": "forecast_456",
-        "timestamp": "2026-02-12T10:00:00",
-        "direction": "YES",
-        "amount_usd": 5.0,
-        "price": 0.6,
-        "shares": 8.33,
-        "order_type": "LIMIT",
-        "status": "PENDING",
-    }
-
-    trade_id = sqlite_client.insert_trade(trade)
-    sqlite_client.update_trade_status(
-        trade_id=trade_id,
-        status="FILLED",
-        fill_price=0.61,
-        fill_amount=8.2,
-        fees=0.05
-    )
-
-    cursor = sqlite_client.conn.cursor()
-    cursor.execute("SELECT * FROM trades WHERE id = ?", [trade_id])
-    row = cursor.fetchone()
-    assert row is not None
-    trade_dict = dict(row)
-    assert trade_dict["status"] == "FILLED"
-    assert trade_dict["fill_price"] == 0.61
-    assert trade_dict["fees"] == 0.05
-
-
 def test_get_open_positions(sqlite_client: SQLiteClient) -> None:
+    from datetime import datetime, timezone
+
     position1 = {
         "market_id": "market_1",
-        "direction": "YES",
-        "shares": 10.0,
+        "direction": "BUY_YES",
+        "num_shares": 10.0,
+        "amount_usd": 5.0,
         "avg_entry_price": 0.5,
-        "total_cost": 5.0,
-        "realized_pnl": 0.0,
+        "current_price": 0.5,
+        "unrealized_pnl": 0.0,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     position2 = {
         "market_id": "market_2",
-        "direction": "NO",
-        "shares": 0.0,
+        "direction": "BUY_NO",
+        "num_shares": 0.0,
+        "amount_usd": 0.0,
         "avg_entry_price": 0.4,
-        "total_cost": 0.0,
-        "realized_pnl": 1.5,
+        "current_price": 0.4,
+        "unrealized_pnl": 0.0,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     sqlite_client.upsert_position(position1)
@@ -112,50 +84,60 @@ def test_get_open_positions(sqlite_client: SQLiteClient) -> None:
 
 
 def test_get_position(sqlite_client: SQLiteClient) -> None:
+    from datetime import datetime, timezone
+
     position = {
         "market_id": "market_123",
-        "direction": "YES",
-        "shares": 10.0,
+        "direction": "BUY_YES",
+        "num_shares": 10.0,
+        "amount_usd": 5.0,
         "avg_entry_price": 0.5,
-        "total_cost": 5.0,
-        "realized_pnl": 0.0,
+        "current_price": 0.5,
+        "unrealized_pnl": 0.0,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     sqlite_client.upsert_position(position)
 
     retrieved = sqlite_client.get_position("market_123")
     assert retrieved is not None
-    assert retrieved["shares"] == 10.0
-    assert retrieved["direction"] == "YES"
+    assert retrieved["num_shares"] == 10.0
+    assert retrieved["direction"] == "BUY_YES"
 
 
 def test_upsert_position(sqlite_client: SQLiteClient) -> None:
+    from datetime import datetime, timezone
+
     position = {
         "market_id": "market_123",
-        "direction": "YES",
-        "shares": 10.0,
+        "direction": "BUY_YES",
+        "num_shares": 10.0,
+        "amount_usd": 5.0,
         "avg_entry_price": 0.5,
-        "total_cost": 5.0,
-        "realized_pnl": 0.0,
+        "current_price": 0.5,
+        "unrealized_pnl": 0.0,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     sqlite_client.upsert_position(position)
 
     updated_position = {
         "market_id": "market_123",
-        "direction": "YES",
-        "shares": 15.0,
+        "direction": "BUY_YES",
+        "num_shares": 15.0,
+        "amount_usd": 7.8,
         "avg_entry_price": 0.52,
-        "total_cost": 7.8,
-        "realized_pnl": 0.5,
+        "current_price": 0.6,
+        "unrealized_pnl": 1.2,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     sqlite_client.upsert_position(updated_position)
 
     retrieved = sqlite_client.get_position("market_123")
     assert retrieved is not None
-    assert retrieved["shares"] == 15.0
-    assert retrieved["realized_pnl"] == 0.5
+    assert retrieved["num_shares"] == 15.0
+    assert retrieved["unrealized_pnl"] == 1.2
 
 
 def test_get_daily_stats(sqlite_client: SQLiteClient) -> None:

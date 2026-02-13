@@ -9,7 +9,7 @@ from config.settings import RiskSettings
 @pytest.fixture
 def risk_settings():
     """Create test risk settings."""
-    return RiskSettings(
+    return RiskSettings.model_construct(
         min_bet=1.0,
         max_bet=10.0,
         max_position_pct=0.10,
@@ -18,6 +18,9 @@ def risk_settings():
         max_single_market_exposure=0.15,
         min_edge=0.05,
         min_liquidity=10000.0,
+        initial_bankroll=50.0,
+        max_daily_loss_pct=0.20,
+        min_confidence=0.65,
     )
 
 

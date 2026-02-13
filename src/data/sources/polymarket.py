@@ -349,6 +349,101 @@ class PolymarketClient:
         logger.info(f"Found {len(matching)} markets matching '{query}'")
         return matching
 
+    async def get_market_resolution(self, market_id: str) -> dict[str, Any] | None:
+        """
+        Check if a market is resolved and get its outcome.
+
+        Args:
+            market_id: Market ID to check
+
+        Returns:
+            Dict with resolution info if market is resolved, None otherwise
+            Format: {"resolved": True, "outcome": True/False, "resolved_at": timestamp}
+            outcome True = YES won, False = NO won
+        """
+        try:
+            await self._check_rate_limit("gamma")
+
+            response = await self.client.get(f"{self.gamma_url}/markets/{market_id}")
+            response.raise_for_status()
+
+            data = response.json()
+
+            # Check if market is closed/resolved
+            # The API may use different fields, we check multiple possibilities
+            is_closed = data.get("closed", False) or data.get("resolved", False)
+
+            if not is_closed:
+                return None
+
+            # Determine outcome
+            # Polymarket stores outcome in different ways depending on the market
+            outcome = None
+            if "outcome" in data:
+                # Direct outcome field (YES = 1 or "YES", NO = 0 or "NO")
+                raw_outcome = data["outcome"]
+                if isinstance(raw_outcome, str):
+                    outcome = raw_outcome.upper() == "YES"
+                else:
+                    outcome = bool(raw_outcome)
+            elif "winning_outcome" in data:
+                # Alternative: winning_outcome field
+                raw_outcome = data["winning_outcome"]
+                if isinstance(raw_outcome, str):
+                    outcome = raw_outcome.upper() == "YES"
+                else:
+                    outcome = bool(raw_outcome)
+
+            if outcome is None:
+                logger.warning(f"Market {market_id} is closed but outcome unknown")
+                return None
+
+            resolved_at = data.get("end_date_iso") or data.get("closed_time") or datetime.now(timezone.utc).isoformat()
+
+            logger.info(f"Market {market_id} resolved: outcome={outcome}")
+            return {
+                "resolved": True,
+                "outcome": outcome,
+                "resolved_at": resolved_at,
+            }
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.warning(f"Market {market_id} not found")
+                return None
+            logger.error(f"HTTP error checking resolution for {market_id}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Error checking resolution for {market_id}: {e}")
+            return None
+
+    async def check_resolutions(self, market_ids: list[str]) -> dict[str, bool]:
+        """
+        Check resolution status for multiple markets concurrently.
+
+        Args:
+            market_ids: List of market IDs to check
+
+        Returns:
+            Dict mapping market_id -> outcome for resolved markets only
+        """
+        semaphore = asyncio.Semaphore(5)  # Max 5 concurrent requests
+
+        async def check_with_semaphore(market_id: str) -> tuple[str, bool | None]:
+            async with semaphore:
+                resolution = await self.get_market_resolution(market_id)
+                if resolution and resolution["resolved"]:
+                    return (market_id, resolution["outcome"])
+                return (market_id, None)
+
+        results = await asyncio.gather(*[check_with_semaphore(mid) for mid in market_ids])
+
+        # Filter out None results
+        resolved = {market_id: outcome for market_id, outcome in results if outcome is not None}
+
+        logger.info(f"Checked {len(market_ids)} markets, found {len(resolved)} resolved")
+        return resolved
+
     async def close(self) -> None:
         await self.client.aclose()
         logger.info("PolymarketClient closed")

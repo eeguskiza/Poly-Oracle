@@ -33,14 +33,31 @@ python cli.py status
 
 ## CLI Commands
 
-- `poly-oracle status` - Check system status
-- `poly-oracle markets` - List active markets
-- `poly-oracle context` - Build context for a market
-- `poly-oracle forecast` - Generate forecast for a market
-- `poly-oracle backtest` - Run historical calibration
-- `poly-oracle paper` - Paper trading mode
-- `poly-oracle live` - Live trading mode
-- `poly-oracle positions` - View open positions
+### Setup & Status
+- `python cli.py init` - Initialize Poly-Oracle directories and verify setup
+- `python cli.py status` - Check system status and configuration
+
+### Market Discovery
+- `python cli.py markets [--limit N]` - List active Polymarket markets (default: 20)
+- `python cli.py market <market_id>` - Show details for a specific market
+
+### News & Context
+- `python cli.py news <query>` - Search for news articles
+- `python cli.py market-news <market_id>` - Get news relevant to a specific market
+- `python cli.py context <market_id>` - Build context for a market (news + historical data)
+
+### Forecasting
+- `python cli.py forecast <market_id>` - Generate forecast using multi-agent debate
+- `python cli.py calibration` - Show calibration performance report
+- `python cli.py backtest` - Run historical calibration
+
+### Trading
+- `python cli.py paper [--once]` - Run in paper trading mode (--once runs one cycle)
+- `python cli.py live` - Run in live trading mode (not yet implemented)
+- `python cli.py positions` - View open positions with unrealized P&L
+- `python cli.py trades [--limit N]` - Display trade history (default: 20)
+
+Note: Market resolution is fully automatic and runs as part of the paper trading loop.
 
 ## Project Structure
 
@@ -61,10 +78,13 @@ poly-oracle/
 ## Running Tests
 
 ```bash
-# Ensure virtual environment is activated
-source venv/bin/activate
+# Run all tests (197 tests covering all layers)
+./venv/bin/pytest tests/ -v
 
-# Run tests
-pytest
-pytest --cov=src tests/
+# Run with coverage report
+./venv/bin/pytest --cov=src tests/
+
+# Run specific test modules
+./venv/bin/pytest tests/unit/test_resolver.py -v
+./venv/bin/pytest tests/integration/test_full_pipeline.py -v
 ```

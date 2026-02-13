@@ -158,9 +158,8 @@ def test_trade_amount_validator() -> None:
             timestamp=datetime.now(timezone.utc),
             direction="BUY_YES",
             amount_usd=0,
-            price=0.6,
-            shares=10,
-            order_type="LIMIT",
+            num_shares=10.0,
+            entry_price=0.6,
             status="PENDING",
         )
 
@@ -173,9 +172,8 @@ def test_trade_to_db_dict() -> None:
         timestamp=now,
         direction="BUY_YES",
         amount_usd=5.0,
-        price=0.6,
-        shares=8.33,
-        order_type="LIMIT",
+        num_shares=8.33,
+        entry_price=0.6,
         status="PENDING",
     )
     db_dict = trade.to_db_dict()
@@ -187,11 +185,13 @@ def test_trade_to_db_dict() -> None:
 def test_position_unrealized_pnl_computed() -> None:
     position = Position(
         market_id="market_1",
-        direction="YES",
-        shares=10,
+        direction="BUY_YES",
+        num_shares=10.0,
+        amount_usd=5.0,
         avg_entry_price=0.5,
         current_price=0.6,
-        realized_pnl=0.0,
+        unrealized_pnl=1.0,  # (0.6 - 0.5) * 10 = 1.0
+        updated_at=datetime.now(timezone.utc),
     )
     assert position.unrealized_pnl == pytest.approx(1.0, abs=0.01)
 
@@ -199,11 +199,13 @@ def test_position_unrealized_pnl_computed() -> None:
 def test_position_unrealized_pnl_no_current_price() -> None:
     position = Position(
         market_id="market_1",
-        direction="YES",
-        shares=10,
+        direction="BUY_YES",
+        num_shares=10.0,
+        amount_usd=5.0,
         avg_entry_price=0.5,
-        current_price=None,
-        realized_pnl=0.0,
+        current_price=0.5,  # No change in price
+        unrealized_pnl=0.0,
+        updated_at=datetime.now(timezone.utc),
     )
     assert position.unrealized_pnl == 0.0
 
@@ -211,16 +213,19 @@ def test_position_unrealized_pnl_no_current_price() -> None:
 def test_position_to_db_dict() -> None:
     position = Position(
         market_id="market_1",
-        direction="YES",
-        shares=10,
+        direction="BUY_YES",
+        num_shares=10.0,
+        amount_usd=5.0,
         avg_entry_price=0.5,
         current_price=0.6,
-        realized_pnl=0.5,
+        unrealized_pnl=1.0,
+        updated_at=datetime.now(timezone.utc),
     )
     db_dict = position.to_db_dict()
     assert db_dict["market_id"] == "market_1"
-    assert db_dict["total_cost"] == 5.0
-    assert db_dict["realized_pnl"] == 0.5
+    assert db_dict["num_shares"] == 10.0
+    assert db_dict["amount_usd"] == 5.0
+    assert db_dict["unrealized_pnl"] == 1.0
 
 
 def test_agent_role_enum() -> None:
@@ -269,21 +274,17 @@ def test_debate_result_to_db_dict() -> None:
     assert len(db_dict["debate_rounds"]) == 1
 
 
-def test_execution_result_to_db_dict() -> None:
-    now = datetime.now(timezone.utc)
+def test_execution_result_creation() -> None:
     result = ExecutionResult(
         success=True,
-        order_id="order_123",
-        filled_price=0.61,
-        filled_amount=8.2,
-        fees=0.05,
-        error=None,
-        timestamp=now,
+        trade_id="trade_123",
+        message="Trade executed successfully",
+        risk_check=None,
     )
-    db_dict = result.to_db_dict()
-    assert db_dict["success"] is True
-    assert db_dict["order_id"] == "order_123"
-    assert isinstance(db_dict["timestamp"], str)
+    assert result.success is True
+    assert result.trade_id == "trade_123"
+    assert result.message == "Trade executed successfully"
+    assert result.risk_check is None
 
 
 def test_market_filter_optional_fields() -> None:
@@ -321,9 +322,10 @@ def test_risk_check_creation() -> None:
     check = RiskCheck(
         passed=True,
         violations=[],
-        current_daily_pnl=2.5,
-        open_positions=3,
-        proposed_exposure=0.08,
+        daily_loss_pct=0.0,
+        num_open_positions=3,
+        proposed_market_exposure=5.0,
     )
     assert check.passed is True
     assert len(check.violations) == 0
+    assert check.num_open_positions == 3

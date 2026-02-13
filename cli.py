@@ -1,6 +1,7 @@
 import asyncio
 import httpx
 import typer
+from datetime import datetime
 from loguru import logger
 
 from config.settings import get_settings
@@ -671,19 +672,21 @@ def calibration() -> None:
         raise typer.Exit(code=1)
 
 
-@app.command()
-def resolve(
+# Resolution is now fully automatic via the paper trading loop
+# Keeping this for manual debugging if needed
+# @app.command()
+def _manual_resolve(
     market_id: str = typer.Argument(..., help="Market ID to resolve"),
     outcome: str = typer.Argument(..., help="Outcome: 'yes' or 'no'"),
 ) -> None:
     """
-    Manually resolve a market outcome.
+    Manually resolve a market outcome (for debugging only).
 
-    Updates the forecast with the outcome and calculates Brier score.
-    Useful for tracking performance during early development.
+    Resolution is now automatic via the paper trading loop.
+    Use this only for manual testing/debugging.
 
     Example:
-        poly-oracle resolve 0x123abc yes
+        python cli.py _manual_resolve 0x123abc yes
     """
     from src.data.storage.duckdb_client import DuckDBClient
     from src.calibration import CalibratorAgent, FeedbackLoop
@@ -769,6 +772,7 @@ def paper(
     from src.data.storage.duckdb_client import DuckDBClient
     from src.data.storage.sqlite_client import SQLiteClient
     from src.calibration import CalibratorAgent, MetaAnalyzer, FeedbackLoop
+    from src.calibration.resolver import MarketResolver
     from src.execution import PositionSizer, RiskManager, PaperTradingExecutor
 
     settings = get_settings()
@@ -785,19 +789,6 @@ def paper(
         with SQLiteClient(settings.database.sqlite_path) as sqlite_client, \
              DuckDBClient(settings.database.duckdb_path) as duckdb_client:
 
-            # Get current bankroll
-            bankroll = sqlite_client.get_current_bankroll()
-            typer.echo(f"\nCurrent Bankroll: ${bankroll:.2f}")
-
-            # Initialize execution components
-            sizer = PositionSizer(risk_settings=settings.risk)
-            risk_manager = RiskManager(risk_settings=settings.risk)
-            executor = PaperTradingExecutor(
-                sqlite=sqlite_client,
-                sizer=sizer,
-                risk=risk_manager,
-            )
-
             # Initialize calibration
             calibrator = CalibratorAgent(history_db=duckdb_client)
             analyzer = MetaAnalyzer(
@@ -807,10 +798,43 @@ def paper(
             )
             feedback = FeedbackLoop(db=duckdb_client, calibrator=calibrator)
 
-            # Fetch active markets
-            typer.echo(f"\nFetching active markets...")
+            # Initialize Polymarket client for resolution checks
             async with PolymarketClient() as poly_client, \
                        NewsClient() as news_client:
+
+                # PHASE 1: Resolve closed markets (ALWAYS FIRST)
+                typer.echo("\nPHASE 1: Checking for resolved markets...")
+                resolver = MarketResolver(
+                    polymarket=poly_client,
+                    feedback=feedback,
+                    sqlite=sqlite_client,
+                    duckdb=duckdb_client,
+                )
+
+                resolution = await resolver.run_resolution_cycle()
+                if resolution["resolved"] > 0:
+                    typer.echo(
+                        f"Resolved {resolution['resolved']} markets. "
+                        f"P&L: {resolution['pnl']:+.2f} EUR"
+                    )
+                else:
+                    typer.echo("No markets resolved")
+
+                # Get current bankroll (updated with P&L from resolutions)
+                bankroll = sqlite_client.get_current_bankroll()
+                typer.echo(f"Current Bankroll: ${bankroll:.2f}")
+
+                # Initialize execution components
+                sizer = PositionSizer(risk_settings=settings.risk)
+                risk_manager = RiskManager(risk_settings=settings.risk)
+                executor = PaperTradingExecutor(
+                    sqlite=sqlite_client,
+                    sizer=sizer,
+                    risk=risk_manager,
+                )
+
+                # PHASE 2: Find new trading opportunities
+                typer.echo(f"\nPHASE 2: Fetching active markets...")
 
                 markets = await poly_client.get_active_markets()
 
@@ -1059,7 +1083,7 @@ def trades(
                 """
                 SELECT
                     id, market_id, direction, amount_usd, num_shares,
-                    entry_price, exit_price, pnl, timestamp, status
+                    entry_price, timestamp, status
                 FROM trades
                 ORDER BY timestamp DESC
                 LIMIT ?
@@ -1071,19 +1095,19 @@ def trades(
                 typer.echo("No trades found")
                 return
 
-            typer.echo("=" * 140)
+            typer.echo("=" * 120)
             typer.echo("TRADE HISTORY")
-            typer.echo("=" * 140)
+            typer.echo("=" * 120)
 
             # Header
             typer.echo(
                 f"{'Timestamp':<20} {'Market ID':<20} {'Direction':<10} "
                 f"{'Amount':<12} {'Shares':<12} {'Entry':<10} {'Status':<10}"
             )
-            typer.echo("-" * 140)
+            typer.echo("-" * 120)
 
             for row in result:
-                trade_id, market_id, direction, amount, shares, entry, exit_p, pnl, timestamp, status = row
+                trade_id, market_id, direction, amount, shares, entry, timestamp, status = row
 
                 # Parse timestamp
                 if isinstance(timestamp, str):
@@ -1097,9 +1121,9 @@ def trades(
                     f"${amount:<11.2f} {shares:<12.2f} ${entry:<9.2f} {status:<10}"
                 )
 
-            typer.echo("=" * 140)
+            typer.echo("=" * 120)
             typer.echo(f"Showing {len(result)} most recent trades")
-            typer.echo("=" * 140)
+            typer.echo("=" * 120)
 
     except Exception as e:
         typer.echo(f"Error: {e}", err=True)
@@ -1109,8 +1133,65 @@ def trades(
 
 @app.command()
 def positions() -> None:
-    """View open positions."""
-    typer.echo("Command not yet implemented")
+    """
+    View open positions.
+
+    Shows all currently open positions with unrealized P&L.
+
+    Example:
+        poly-oracle positions
+    """
+    from src.data.storage.sqlite_client import SQLiteClient
+
+    try:
+        settings = get_settings()
+
+        with SQLiteClient(settings.database.sqlite_path) as sqlite_client:
+            open_positions = sqlite_client.get_open_positions()
+
+            if not open_positions:
+                typer.echo("No open positions")
+                return
+
+            typer.echo("=" * 130)
+            typer.echo("OPEN POSITIONS")
+            typer.echo("=" * 130)
+
+            # Header
+            typer.echo(
+                f"{'Market ID':<25} {'Direction':<10} {'Shares':<12} "
+                f"{'Amount':<12} {'Entry':<10} {'Current':<10} {'Unrealized P&L':<15}"
+            )
+            typer.echo("-" * 130)
+
+            total_pnl = 0.0
+            for pos in open_positions:
+                market_id = pos["market_id"]
+                direction = pos["direction"]
+                shares = pos["num_shares"]
+                amount = pos["amount_usd"]
+                entry = pos["avg_entry_price"]
+                current = pos["current_price"]
+                pnl = pos["unrealized_pnl"]
+
+                total_pnl += pnl
+
+                # Format P&L with color
+                pnl_str = f"${pnl:+.2f}"
+
+                typer.echo(
+                    f"{market_id[:25]:<25} {direction:<10} {shares:<12.2f} "
+                    f"${amount:<11.2f} ${entry:<9.3f} ${current:<9.3f} {pnl_str:<15}"
+                )
+
+            typer.echo("=" * 130)
+            typer.echo(f"Total Unrealized P&L: ${total_pnl:+.2f}")
+            typer.echo("=" * 130)
+
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        logger.exception("Positions command failed")
+        raise typer.Exit(code=1)
 
 
 if __name__ == "__main__":

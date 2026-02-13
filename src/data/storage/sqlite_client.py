@@ -21,18 +21,12 @@ class SQLiteClient:
             CREATE TABLE IF NOT EXISTS trades (
                 id TEXT PRIMARY KEY,
                 market_id TEXT NOT NULL,
-                forecast_id TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 direction TEXT NOT NULL,
                 amount_usd REAL NOT NULL,
-                price REAL NOT NULL,
-                shares REAL NOT NULL,
-                order_type TEXT NOT NULL,
-                status TEXT NOT NULL,
-                fill_price REAL,
-                fill_amount REAL,
-                fees REAL,
-                tx_hash TEXT
+                num_shares REAL NOT NULL,
+                entry_price REAL NOT NULL,
+                status TEXT NOT NULL
             )
         """)
 
@@ -40,10 +34,12 @@ class SQLiteClient:
             CREATE TABLE IF NOT EXISTS positions (
                 market_id TEXT PRIMARY KEY,
                 direction TEXT NOT NULL,
-                shares REAL NOT NULL,
+                num_shares REAL NOT NULL,
+                amount_usd REAL NOT NULL,
                 avg_entry_price REAL NOT NULL,
-                total_cost REAL NOT NULL,
-                realized_pnl REAL NOT NULL
+                current_price REAL NOT NULL,
+                unrealized_pnl REAL NOT NULL,
+                updated_at TEXT NOT NULL
             )
         """)
 
@@ -69,19 +65,17 @@ class SQLiteClient:
 
         cursor.execute("""
             INSERT INTO trades (
-                id, market_id, forecast_id, timestamp, direction,
-                amount_usd, price, shares, order_type, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                id, market_id, timestamp, direction,
+                amount_usd, num_shares, entry_price, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, [
             trade_id,
             trade["market_id"],
-            trade["forecast_id"],
             trade["timestamp"],
             trade["direction"],
             trade["amount_usd"],
-            trade["price"],
-            trade["shares"],
-            trade["order_type"],
+            trade["num_shares"],
+            trade["entry_price"],
             trade["status"],
         ])
 
@@ -89,28 +83,9 @@ class SQLiteClient:
         logger.debug(f"Inserted trade {trade_id}")
         return trade_id
 
-    def update_trade_status(
-        self,
-        trade_id: str,
-        status: str,
-        fill_price: float,
-        fill_amount: float,
-        fees: float
-    ) -> None:
-        cursor = self.conn.cursor()
-
-        cursor.execute("""
-            UPDATE trades
-            SET status = ?, fill_price = ?, fill_amount = ?, fees = ?
-            WHERE id = ?
-        """, [status, fill_price, fill_amount, fees, trade_id])
-
-        self.conn.commit()
-        logger.info(f"Updated trade {trade_id} to status {status}")
-
     def get_open_positions(self) -> list[dict[str, Any]]:
         cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM positions WHERE shares > 0")
+        cursor.execute("SELECT * FROM positions WHERE num_shares > 0")
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
 
@@ -125,21 +100,26 @@ class SQLiteClient:
 
         cursor.execute("""
             INSERT INTO positions (
-                market_id, direction, shares, avg_entry_price, total_cost, realized_pnl
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                market_id, direction, num_shares, amount_usd, avg_entry_price,
+                current_price, unrealized_pnl, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(market_id) DO UPDATE SET
                 direction = excluded.direction,
-                shares = excluded.shares,
+                num_shares = excluded.num_shares,
+                amount_usd = excluded.amount_usd,
                 avg_entry_price = excluded.avg_entry_price,
-                total_cost = excluded.total_cost,
-                realized_pnl = excluded.realized_pnl
+                current_price = excluded.current_price,
+                unrealized_pnl = excluded.unrealized_pnl,
+                updated_at = excluded.updated_at
         """, [
             position["market_id"],
             position["direction"],
-            position["shares"],
+            position["num_shares"],
+            position["amount_usd"],
             position["avg_entry_price"],
-            position["total_cost"],
-            position["realized_pnl"],
+            position["current_price"],
+            position["unrealized_pnl"],
+            position["updated_at"],
         ])
 
         self.conn.commit()

@@ -58,6 +58,18 @@ class Position(BaseModel):
     unrealized_pnl: float
     updated_at: datetime
 
+    def to_db_dict(self) -> dict[str, Any]:
+        return {
+            "market_id": self.market_id,
+            "direction": self.direction,
+            "num_shares": self.num_shares,
+            "amount_usd": self.amount_usd,
+            "avg_entry_price": self.avg_entry_price,
+            "current_price": self.current_price,
+            "unrealized_pnl": self.unrealized_pnl,
+            "updated_at": self.updated_at.isoformat(),
+        }
+
 
 class RiskCheck(BaseModel):
     model_config = {"from_attributes": True}
