@@ -80,6 +80,23 @@ class SimpleForecast(BaseModel):
             raise ValueError("Confidence bounds must be between 0 and 1")
         return v
 
+    def compute_confidence(self) -> float:
+        """Compute confidence from CI bounds or bull/bear convergence.
+
+        Priority:
+        1. CI bounds from judge (1 - interval width)
+        2. Bull/bear spread convergence (1 - last round spread)
+        3. Default 0.5
+        """
+        if self.confidence_lower is not None and self.confidence_upper is not None:
+            return max(0.0, min(1.0, 1.0 - (self.confidence_upper - self.confidence_lower)))
+        if self.bull_probabilities and self.bear_probabilities:
+            last_bull = self.bull_probabilities[-1]
+            last_bear = self.bear_probabilities[-1]
+            spread = abs(last_bull - last_bear)
+            return max(0.5, 1.0 - spread)
+        return 0.5
+
 
 class Forecast(BaseModel):
     model_config = {"from_attributes": True}

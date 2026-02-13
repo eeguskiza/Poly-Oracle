@@ -10,6 +10,7 @@ from src.models import (
     DebateRound,
     RawForecast,
     CalibratedForecast,
+    SimpleForecast,
     Forecast,
     EdgeAnalysis,
     PositionSize,
@@ -329,3 +330,65 @@ def test_risk_check_creation() -> None:
     assert check.passed is True
     assert len(check.violations) == 0
     assert check.num_open_positions == 3
+
+
+class TestSimpleForecastComputeConfidence:
+    def _make_forecast(self, **kwargs) -> SimpleForecast:
+        defaults = {
+            "market_id": "test",
+            "probability": 0.6,
+            "reasoning": "test",
+            "model_name": "mistral",
+            "debate_rounds": 1,
+        }
+        defaults.update(kwargs)
+        return SimpleForecast(**defaults)
+
+    def test_with_ci_bounds(self) -> None:
+        """confidence = 1 - (upper - lower)."""
+        f = self._make_forecast(confidence_lower=0.3, confidence_upper=0.7)
+        assert f.compute_confidence() == pytest.approx(0.6)
+
+    def test_with_tight_ci_bounds(self) -> None:
+        """Tight CI should give high confidence."""
+        f = self._make_forecast(confidence_lower=0.55, confidence_upper=0.65)
+        assert f.compute_confidence() == pytest.approx(0.9)
+
+    def test_with_zero_ci_lower(self) -> None:
+        """confidence_lower=0.0 should not be treated as falsy."""
+        f = self._make_forecast(confidence_lower=0.0, confidence_upper=0.5)
+        assert f.compute_confidence() == pytest.approx(0.5)
+
+    def test_without_ci_uses_bull_bear_spread(self) -> None:
+        """When CI is absent, use bull/bear convergence."""
+        f = self._make_forecast(
+            bull_probabilities=[0.65],
+            bear_probabilities=[0.55],
+        )
+        # spread = 0.1 -> confidence = 0.9
+        assert f.compute_confidence() == pytest.approx(0.9)
+
+    def test_wide_bull_bear_spread(self) -> None:
+        """Large bull/bear spread => low confidence, floored at 0.5."""
+        f = self._make_forecast(
+            bull_probabilities=[0.8],
+            bear_probabilities=[0.2],
+        )
+        # spread = 0.6 -> 1 - 0.6 = 0.4 -> clamped to 0.5
+        assert f.compute_confidence() == pytest.approx(0.5)
+
+    def test_default_no_data(self) -> None:
+        """When neither CI bounds nor bull/bear probs exist, return 0.5."""
+        f = self._make_forecast()
+        assert f.compute_confidence() == pytest.approx(0.5)
+
+    def test_ci_bounds_take_priority_over_bull_bear(self) -> None:
+        """CI bounds should be preferred over bull/bear spread."""
+        f = self._make_forecast(
+            confidence_lower=0.4,
+            confidence_upper=0.6,
+            bull_probabilities=[0.8],
+            bear_probabilities=[0.2],
+        )
+        # Should use CI: 1 - 0.2 = 0.8, not bull/bear: 1 - 0.6 = 0.4
+        assert f.compute_confidence() == pytest.approx(0.8)

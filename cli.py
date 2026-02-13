@@ -55,6 +55,14 @@ app = typer.Typer(no_args_is_help=True)
 
 
 @app.command()
+def start() -> None:
+    """Launch interactive terminal dashboard."""
+    from src.dashboard.terminal import create_dashboard
+    dashboard = create_dashboard()
+    asyncio.run(dashboard.run())
+
+
+@app.command()
 def init() -> None:
     """Initialize Poly-Oracle directories and verify setup."""
     try:
@@ -501,7 +509,7 @@ def forecast(
             async with OllamaClient(
                 base_url=settings.llm.base_url,
                 model=settings.llm.model,
-                timeout=120
+                timeout=settings.llm.timeout
             ) as test_ollama:
                 is_available = await test_ollama.is_available()
 
@@ -543,7 +551,7 @@ def forecast(
                 orchestrator, ollama = create_debate_system(
                     base_url=settings.llm.base_url,
                     model=settings.llm.model,
-                    timeout=120,
+                    timeout=settings.llm.timeout,
                 )
 
                 try:
@@ -565,10 +573,8 @@ def forecast(
                         )
                         feedback = FeedbackLoop(db=duckdb_client, calibrator=calibrator)
 
-                        # Calculate confidence from interval if available
-                        confidence = 0.5
-                        if forecast_result.confidence_lower and forecast_result.confidence_upper:
-                            confidence = 1.0 - (forecast_result.confidence_upper - forecast_result.confidence_lower)
+                        # Calculate confidence
+                        confidence = forecast_result.compute_confidence()
 
                         # Calibrate forecast
                         calibrated = calibrator.calibrate(
@@ -840,7 +846,7 @@ def paper(
         async with OllamaClient(
             base_url=settings.llm.base_url,
             model=settings.llm.model,
-            timeout=30,
+            timeout=120,
         ) as test_ollama:
             if not await test_ollama.is_available():
                 return False, f"Ollama model '{settings.llm.model}' is not available."
@@ -868,6 +874,9 @@ def paper(
         # Initialize clients
         with SQLiteClient(settings.database.sqlite_path) as sqlite_client, \
              DuckDBClient(settings.database.duckdb_path) as duckdb_client:
+
+            sqlite_client.initialize_schema()
+            sqlite_client.seed_initial_bankroll(settings.risk.initial_bankroll)
 
             # Initialize calibration
             calibrator = CalibratorAgent(history_db=duckdb_client)
@@ -962,7 +971,7 @@ def paper(
                             orchestrator, ollama = create_debate_system(
                                 base_url=settings.llm.base_url,
                                 model=settings.llm.model,
-                                timeout=120,
+                                timeout=settings.llm.timeout,
                             )
 
                             try:
@@ -975,9 +984,7 @@ def paper(
                                 )
 
                                 # Calibrate forecast
-                                confidence = 0.5
-                                if forecast_result.confidence_lower and forecast_result.confidence_upper:
-                                    confidence = 1.0 - (forecast_result.confidence_upper - forecast_result.confidence_lower)
+                                confidence = forecast_result.compute_confidence()
 
                                 calibrated = calibrator.calibrate(
                                     raw_forecast=forecast_result.probability,
@@ -1216,69 +1223,6 @@ def trades(
     except Exception as e:
         typer.echo(f"Error: {e}", err=True)
         logger.exception("Trades command failed")
-        raise typer.Exit(code=1)
-
-
-@app.command()
-def positions() -> None:
-    """
-    View open positions.
-
-    Shows all currently open positions with unrealized P&L.
-
-    Example:
-        poly-oracle positions
-    """
-    from src.data.storage.sqlite_client import SQLiteClient
-
-    try:
-        settings = get_settings()
-
-        with SQLiteClient(settings.database.sqlite_path) as sqlite_client:
-            open_positions = sqlite_client.get_open_positions()
-
-            if not open_positions:
-                typer.echo("No open positions")
-                return
-
-            typer.echo("=" * 130)
-            typer.echo("OPEN POSITIONS")
-            typer.echo("=" * 130)
-
-            # Header
-            typer.echo(
-                f"{'Market ID':<25} {'Direction':<10} {'Shares':<12} "
-                f"{'Amount':<12} {'Entry':<10} {'Current':<10} {'Unrealized P&L':<15}"
-            )
-            typer.echo("-" * 130)
-
-            total_pnl = 0.0
-            for pos in open_positions:
-                market_id = pos["market_id"]
-                direction = pos["direction"]
-                shares = pos["num_shares"]
-                amount = pos["amount_usd"]
-                entry = pos["avg_entry_price"]
-                current = pos["current_price"]
-                pnl = pos["unrealized_pnl"]
-
-                total_pnl += pnl
-
-                # Format P&L with color
-                pnl_str = f"${pnl:+.2f}"
-
-                typer.echo(
-                    f"{market_id[:25]:<25} {direction:<10} {shares:<12.2f} "
-                    f"${amount:<11.2f} ${entry:<9.3f} ${current:<9.3f} {pnl_str:<15}"
-                )
-
-            typer.echo("=" * 130)
-            typer.echo(f"Total Unrealized P&L: ${total_pnl:+.2f}")
-            typer.echo("=" * 130)
-
-    except Exception as e:
-        typer.echo(f"Error: {e}", err=True)
-        logger.exception("Positions command failed")
         raise typer.Exit(code=1)
 
 

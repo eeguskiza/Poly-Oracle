@@ -161,6 +161,24 @@ class SQLiteClient:
         self.conn.commit()
         logger.debug(f"Upserted daily stats for {stats['date']}")
 
+    def seed_initial_bankroll(self, amount: float) -> None:
+        """Seed initial bankroll if no daily_stats rows exist yet."""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM daily_stats")
+        count = cursor.fetchone()[0]
+        if count == 0:
+            from datetime import datetime, timezone
+
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            cursor.execute("""
+                INSERT INTO daily_stats (
+                    date, starting_bankroll, ending_bankroll, trades_executed,
+                    trades_won, gross_pnl, fees_paid, net_pnl
+                ) VALUES (?, ?, ?, 0, 0, 0.0, 0.0, 0.0)
+            """, [today, amount, amount])
+            self.conn.commit()
+            logger.info(f"Seeded initial bankroll: {amount}")
+
     def get_current_bankroll(self) -> float:
         cursor = self.conn.cursor()
         cursor.execute("""

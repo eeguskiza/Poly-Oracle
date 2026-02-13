@@ -193,6 +193,31 @@ def test_upsert_daily_stats(sqlite_client: SQLiteClient) -> None:
     assert retrieved["trades_executed"] == 5
 
 
+def test_seed_initial_bankroll_empty_db(sqlite_client: SQLiteClient) -> None:
+    """seed_initial_bankroll inserts a row when daily_stats is empty."""
+    assert sqlite_client.get_current_bankroll() == 0.0
+    sqlite_client.seed_initial_bankroll(50.0)
+    assert sqlite_client.get_current_bankroll() == 50.0
+
+
+def test_seed_initial_bankroll_idempotent(sqlite_client: SQLiteClient) -> None:
+    """seed_initial_bankroll does nothing when daily_stats already has rows."""
+    sqlite_client.seed_initial_bankroll(50.0)
+    sqlite_client.upsert_daily_stats({
+        "date": "2099-12-31",
+        "starting_bankroll": 50.0,
+        "ending_bankroll": 55.0,
+        "trades_executed": 1,
+        "trades_won": 1,
+        "gross_pnl": 5.0,
+        "fees_paid": 0.0,
+        "net_pnl": 5.0,
+    })
+    # Calling again should NOT overwrite
+    sqlite_client.seed_initial_bankroll(50.0)
+    assert sqlite_client.get_current_bankroll() == 55.0
+
+
 def test_get_current_bankroll(sqlite_client: SQLiteClient) -> None:
     stats1 = {
         "date": "2026-02-11",

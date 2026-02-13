@@ -18,6 +18,8 @@ dependencies = [
     "feedparser",
     "pyyaml",
     "scikit-learn",
+    "rich",
+    "questionary",
 ]
 
 [project.optional-dependencies]

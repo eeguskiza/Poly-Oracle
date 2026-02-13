@@ -14,7 +14,7 @@ class LLMSettings(BaseSettings):
     embedding_model: str = Field(default="nomic-embed-text", alias="OLLAMA_EMBEDDING_MODEL")
     temperature: float = 0.7
     max_tokens: int = 2000
-    timeout: int = 120
+    timeout: int = 300
 
 
 class RiskSettings(BaseSettings):

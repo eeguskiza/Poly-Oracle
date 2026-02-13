@@ -17,7 +17,7 @@ def test_llm_settings_defaults() -> None:
     assert llm.embedding_model == "nomic-embed-text"
     assert llm.temperature == 0.7
     assert llm.max_tokens == 2000
-    assert llm.timeout == 120
+    assert llm.timeout == 300
 
 
 def test_risk_settings_defaults() -> None:

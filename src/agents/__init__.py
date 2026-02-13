@@ -9,7 +9,7 @@ from src.agents.orchestrator import DebateOrchestrator
 def create_debate_system(
     base_url: str = "http://localhost:11434",
     model: str = "mistral",
-    timeout: int = 120,
+    timeout: int = 300,
 ) -> tuple[DebateOrchestrator, OllamaClient]:
     """
     Create a complete debate system with all agents.

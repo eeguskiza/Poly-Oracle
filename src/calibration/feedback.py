@@ -57,11 +57,7 @@ class FeedbackLoop:
                 "timestamp": forecast.created_at.isoformat(),
                 "raw_probability": forecast.probability,
                 "calibrated_probability": calibrated_probability,
-                "confidence": (
-                    (forecast.confidence_upper + forecast.confidence_lower) / 2
-                    if forecast.confidence_lower and forecast.confidence_upper
-                    else 0.5
-                ),
+                "confidence": forecast.compute_confidence(),
                 "debate_log": {
                     "rounds": forecast.debate_rounds,
                     "model": forecast.model_name,
