@@ -1,3 +1,5 @@
+VERSION = "0.1.0"
+
 from pathlib import Path
 from typing import Optional
 from functools import lru_cache

@@ -2,6 +2,7 @@
 Terminal Dashboard - Interactive Rich + questionary dashboard for Poly-Oracle.
 """
 import asyncio
+import io
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -16,7 +17,14 @@ from rich.panel import Panel
 from rich.table import Table, box
 from rich.text import Text
 
-from config.settings import Settings, get_settings
+try:
+    import plotext as plt
+
+    HAS_PLOTEXT = True
+except ImportError:
+    HAS_PLOTEXT = False
+
+from config.settings import VERSION, Settings, get_settings
 from src.agents import create_debate_system
 from src.agents.base import OllamaClient
 from src.calibration import CalibratorAgent, FeedbackLoop, MetaAnalyzer
@@ -38,9 +46,13 @@ MENU_CHOICES = [
     "Market Scanner      - Browse active markets",
     "Single Forecast     - Run debate on one market",
     "Portfolio           - Positions and P&L",
+    "Trade History       - Recent executed trades",
     "Performance         - Brier score and accuracy",
+    "Equity Curve        - Portfolio value over time",
+    "Backtest            - Historical simulation",
     "System Status       - Component health",
     "Settings            - Current configuration",
+    "Help                - About Poly-Oracle",
     "Exit",
 ]
 
@@ -84,16 +96,83 @@ class TerminalDashboard:
         self.risk_manager = risk_manager
         self.executor = executor
 
+    async def _show_splash(self) -> None:
+        """Display splash screen with ASCII logo, version, mode, and health summary."""
+        mode = "PAPER" if self.settings.paper_trading else "LIVE"
+        mode_style = "yellow" if mode == "PAPER" else "red bold"
+
+        logo = r"""
+  ____       _            ___                  _
+ |  _ \ ___ | |_   _     / _ \ _ __ __ _  ___| | ___
+ | |_) / _ \| | | | |___| | | | '__/ _` |/ __| |/ _ \
+ |  __/ (_) | | |_| |___| |_| | | | (_| | (__| |  __/
+ |_|   \___/|_|\__, |    \___/|_|  \__,_|\___|_|\___|
+               |___/
+"""
+        console.print(f"[bold cyan]{logo}[/bold cyan]")
+
+        # Banner info
+        bankroll = self.sqlite.get_current_bankroll()
+        banner = (
+            f"  [bold]v{VERSION}[/bold]  |  "
+            f"Mode: [{mode_style}]{mode}[/{mode_style}]  |  "
+            f"LLM: [bold]{self.settings.llm.model}[/bold]  |  "
+            f"Bankroll: [bold]{bankroll:.2f} EUR[/bold]"
+        )
+        console.print(banner)
+        console.print()
+
+        # Quick health checks
+        checks = await self._get_system_checks()
+        health_table = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
+        health_table.add_column("Component", style="bold", width=14)
+        health_table.add_column("Status", width=8)
+        health_table.add_column("Detail", ratio=1)
+
+        for name, status, detail in checks:
+            if status == "[OK]":
+                style = "green"
+            elif status == "[WARN]":
+                style = "yellow"
+            else:
+                style = "red"
+            health_table.add_row(name, f"[{style}]{status}[/{style}]", detail)
+
+        console.print(Panel(health_table, title="System Health", box=box.ROUNDED))
+        console.print()
+
+        # Config summary
+        config_summary = (
+            f"[bold]LLM:[/bold] {self.settings.llm.model} @ {self.settings.llm.base_url} "
+            f"(temp={self.settings.llm.temperature}, timeout={self.settings.llm.timeout}s)\n"
+            f"[bold]Risk:[/bold] edge>={self.settings.risk.min_edge:.0%}, "
+            f"bet ${self.settings.risk.min_bet:.0f}-${self.settings.risk.max_bet:.0f}, "
+            f"max {self.settings.risk.max_open_positions} positions\n"
+            f"[bold]Data:[/bold] NewsAPI {'configured' if self.settings.data.newsapi_key else 'not set (RSS only)'}, "
+            f"Polymarket API "
+            f"{'configured' if all([self.settings.polymarket.api_key, self.settings.polymarket.api_secret, self.settings.polymarket.api_passphrase]) else 'not set'}"
+        )
+        console.print(Panel(config_summary, title="Configuration", box=box.ROUNDED))
+        console.print()
+
+        # Risk alerts
+        alerts = self._get_risk_alerts()
+        if alerts:
+            alert_text = "\n".join(f"[red bold]WARNING:[/red bold] {a}" for a in alerts)
+            console.print(Panel(alert_text, title="Risk Alerts", box=box.HEAVY, border_style="red"))
+            console.print()
+
     async def run(self) -> None:
         """Main dashboard loop: menu -> action -> menu. Ctrl+C exits cleanly."""
+        await self._show_splash()
         mode = "PAPER MODE" if self.settings.paper_trading else "LIVE MODE"
         while True:
             try:
                 console.print()
                 choice = await questionary.select(
-                    f"Poly-Oracle Terminal [{mode}]",
+                    f"Poly-Oracle [{mode}] - Main Menu",
                     choices=MENU_CHOICES,
-                    qmark="",
+                    qmark=">>",
                     pointer=">",
                 ).ask_async()
 
@@ -918,6 +997,265 @@ class TerminalDashboard:
         console.print("[dim]Edit .env file and restart to change settings.[/dim]")
 
     # ------------------------------------------------------------------
+    # Trade History
+    # ------------------------------------------------------------------
+    async def _screen_trade_history(self) -> None:
+        try:
+            cursor = self.sqlite.conn.cursor()
+            rows = cursor.execute(
+                """
+                SELECT id, market_id, direction, amount_usd, num_shares,
+                       entry_price, timestamp, status
+                FROM trades
+                ORDER BY timestamp DESC
+                LIMIT 30
+                """
+            ).fetchall()
+        except Exception:
+            rows = []
+
+        if not rows:
+            console.print("[dim]No trades recorded yet. Start trading to see history.[/dim]")
+            return
+
+        tbl = Table(title="Trade History (last 30)", box=box.ROUNDED)
+        tbl.add_column("Time", width=18)
+        tbl.add_column("Market", min_width=25, max_width=35)
+        tbl.add_column("Direction", width=10)
+        tbl.add_column("Amount", justify="right", width=10)
+        tbl.add_column("Shares", justify="right", width=10)
+        tbl.add_column("Entry", justify="right", width=8)
+        tbl.add_column("Status", width=10)
+
+        total_volume = 0.0
+        for row in rows:
+            trade_id, market_id, direction, amount, shares, entry, timestamp, status = row
+            total_volume += float(amount) if amount else 0.0
+
+            if isinstance(timestamp, str):
+                ts_str = timestamp[:19].replace("T", " ")
+            else:
+                ts_str = str(timestamp)[:19]
+
+            tbl.add_row(
+                ts_str,
+                _truncate(str(market_id), 33),
+                str(direction),
+                f"${float(amount):.2f}" if amount else "-",
+                f"{float(shares):.2f}" if shares else "-",
+                f"${float(entry):.2f}" if entry else "-",
+                str(status),
+            )
+
+        console.print(tbl)
+        console.print(
+            f"  [bold]Total:[/bold] {len(rows)} trades  |  "
+            f"[bold]Volume:[/bold] ${total_volume:,.2f}\n"
+        )
+
+    # ------------------------------------------------------------------
+    # Help
+    # ------------------------------------------------------------------
+    async def _screen_help(self) -> None:
+        help_text = (
+            f"[bold cyan]Poly-Oracle v{VERSION}[/bold cyan]\n"
+            "Multi-agent forecasting system for Polymarket prediction markets.\n"
+            "\n"
+            "[bold]Architecture[/bold]\n"
+            "  Data Layer    : Polymarket API, NewsAPI/RSS, ChromaDB embeddings\n"
+            "  Agent Layer   : Bull/Bear/Devil's Advocate debate via local LLM (Ollama)\n"
+            "  Calibration   : Brier scoring, isotonic regression, feedback loops\n"
+            "  Execution     : Kelly criterion sizing, risk management, paper/live trading\n"
+            "\n"
+            "[bold]Dashboard Menu[/bold]\n"
+            "  Start Trading  - Launch the autonomous scan-forecast-trade loop\n"
+            "  Market Scanner - Browse and filter active Polymarket markets\n"
+            "  Single Forecast- Run a multi-agent debate on a specific market\n"
+            "  Portfolio      - View open positions and P&L summary\n"
+            "  Trade History  - See recently executed trades\n"
+            "  Performance    - Brier scores, calibration curves, win rate\n"
+            "  Equity Curve   - Portfolio value and drawdown charts\n"
+            "  Backtest       - Historical replay or full LLM simulation\n"
+            "  System Status  - Health check of all components\n"
+            "  Settings       - View current configuration\n"
+            "\n"
+            "[bold]CLI Commands[/bold]\n"
+            "  python cli.py start                      Launch interactive terminal\n"
+            "  python cli.py start --paper              Force paper trading mode\n"
+            "  python cli.py start --live               Force live trading mode\n"
+            "  python cli.py paper --once               Run one paper trading cycle\n"
+            "  python cli.py live --once                Run one live trading cycle\n"
+            "  python cli.py trade --mode crypto        Crypto-focused trading\n"
+            "  python cli.py trade --mode auto          Auto viability selector\n"
+            "  python cli.py backtest                   Fast replay backtest\n"
+            "  python cli.py backtest --full            Full LLM backtest\n"
+            "  python cli.py forecast <market_id>       Forecast a specific market\n"
+            "  python cli.py markets                    List active markets\n"
+            "  python cli.py positions                  Show open positions\n"
+            "  python cli.py trades                     Show trade history\n"
+            "  python cli.py status                     System status check\n"
+            "  python cli.py calibration                Calibration report\n"
+        )
+        console.print(Panel(help_text, title="Help", box=box.ROUNDED))
+
+    # ------------------------------------------------------------------
+    # Equity Curve
+    # ------------------------------------------------------------------
+    async def _screen_equity_curve(self) -> None:
+        """Display equity curve using plotext ASCII chart."""
+        try:
+            cursor = self.sqlite.conn.cursor()
+            rows = cursor.execute(
+                "SELECT date, ending_bankroll FROM daily_stats ORDER BY date ASC"
+            ).fetchall()
+        except Exception:
+            rows = []
+
+        if not rows:
+            console.print("[dim]No daily stats yet. Start trading to build equity data.[/dim]")
+            return
+
+        dates = [str(r[0]) for r in rows]
+        values = [float(r[1]) for r in rows]
+
+        if HAS_PLOTEXT:
+            plt.clear_figure()
+            plt.plot(values, label="Equity")
+            plt.title("Equity Curve")
+            plt.xlabel("Day")
+            plt.ylabel("EUR")
+            plt.theme("dark")
+            chart_str = plt.build()
+            console.print(Panel(chart_str, title="Equity Curve", box=box.ROUNDED))
+        else:
+            tbl = Table(title="Equity Curve (install plotext for chart)", box=box.ROUNDED)
+            tbl.add_column("Date", width=12)
+            tbl.add_column("Equity", justify="right", width=12)
+            for d, v in zip(dates[-20:], values[-20:]):
+                tbl.add_row(d, f"{v:.2f}")
+            console.print(tbl)
+
+        # Drawdown
+        if len(values) >= 2:
+            peak = values[0]
+            max_dd = 0.0
+            dd_values = []
+            for v in values:
+                if v > peak:
+                    peak = v
+                dd = (peak - v) / peak if peak > 0 else 0
+                dd_values.append(dd)
+                max_dd = max(max_dd, dd)
+
+            if HAS_PLOTEXT:
+                plt.clear_figure()
+                plt.plot([-d * 100 for d in dd_values], label="Drawdown %")
+                plt.title("Drawdown")
+                plt.xlabel("Day")
+                plt.ylabel("% from peak")
+                plt.theme("dark")
+                dd_chart = plt.build()
+                console.print(Panel(dd_chart, title="Drawdown", box=box.ROUNDED))
+
+            console.print(f"[bold]Max Drawdown:[/bold] {max_dd:.1%}")
+
+    # ------------------------------------------------------------------
+    # Backtest
+    # ------------------------------------------------------------------
+    async def _screen_backtest(self) -> None:
+        """Run backtest from terminal menu."""
+        from src.calibration.backtester import Backtester
+
+        mode = await questionary.select(
+            "Backtest mode:",
+            choices=["Replay (fast, no LLM)", "Full (slow, with LLM)", "Cancel"],
+        ).ask_async()
+
+        if mode is None or mode.startswith("Cancel"):
+            return
+
+        bt = Backtester(duckdb=self.duckdb, settings=self.settings)
+
+        if mode.startswith("Replay"):
+            with console.status("[cyan]Running replay backtest...[/cyan]"):
+                result = bt.run_replay()
+        else:
+            with console.status("[cyan]Running full backtest (this may take a while)...[/cyan]"):
+                result = await bt.run_full(
+                    polymarket=self.polymarket,
+                    news_client=self.news,
+                    chroma=self.chroma,
+                )
+
+        if result.total_forecasts == 0:
+            console.print("[dim]No resolved forecasts for backtesting.[/dim]")
+            return
+
+        # Results table
+        tbl = Table(title="Backtest Results", box=box.ROUNDED)
+        tbl.add_column("Metric", style="bold", width=20)
+        tbl.add_column("Value", justify="right", width=15)
+
+        tbl.add_row("Total Forecasts", str(result.total_forecasts))
+        tbl.add_row("Simulated Trades", str(result.simulated_trades))
+        tbl.add_row("Final Equity", f"${result.final_equity:.2f}")
+        tbl.add_row("Max Drawdown", f"{result.max_drawdown:.1%}")
+        if result.sharpe_ratio is not None:
+            tbl.add_row("Sharpe Ratio", f"{result.sharpe_ratio:.2f}")
+        tbl.add_row("Win Rate", f"{result.win_rate:.1%}")
+        tbl.add_row("Brier Score", f"{result.brier_score:.4f}")
+
+        console.print(tbl)
+
+        # Equity curve chart
+        if result.equity_curve and HAS_PLOTEXT:
+            plt.clear_figure()
+            plt.plot(result.equity_curve, label="Equity")
+            plt.title("Backtest Equity Curve")
+            plt.theme("dark")
+            console.print(Panel(plt.build(), title="Equity", box=box.ROUNDED))
+
+    # ------------------------------------------------------------------
+    # Risk alerts helper
+    # ------------------------------------------------------------------
+    def _get_risk_alerts(self) -> list[str]:
+        """Return list of active risk warnings."""
+        alerts: list[str] = []
+        try:
+            bankroll = self.sqlite.get_current_bankroll()
+            initial = self.settings.risk.initial_bankroll
+
+            # Bankroll critically low
+            if initial > 0 and bankroll < initial * 0.20:
+                alerts.append(
+                    f"Bankroll is {bankroll:.2f} EUR — below 20% of initial ({initial:.2f} EUR)"
+                )
+
+            # Max open positions
+            positions = self.sqlite.get_open_positions()
+            if len(positions) >= self.settings.risk.max_open_positions:
+                alerts.append(
+                    f"Open positions ({len(positions)}) at maximum ({self.settings.risk.max_open_positions})"
+                )
+
+            # Daily loss approaching limit
+            try:
+                daily_stats = self.sqlite.get_daily_stats(datetime.now(timezone.utc).date())
+                if daily_stats:
+                    daily_loss = abs(float(daily_stats.get("realized_pnl", 0.0)))
+                    limit = initial * self.settings.risk.max_daily_loss_pct
+                    if limit > 0 and daily_loss >= limit * 0.80:
+                        alerts.append(
+                            f"Daily loss ({daily_loss:.2f}) is >=80% of limit ({limit:.2f})"
+                        )
+            except Exception:
+                pass
+
+        except Exception:
+            pass
+        return alerts
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
     async def _build_context(self, market: Any) -> str:
@@ -968,14 +1306,25 @@ def create_dashboard() -> TerminalDashboard:
         duckdb=duckdb,
     )
 
-    # Execution
+    # Execution — use LiveTradingExecutor when not in paper mode
     sizer = PositionSizer(risk_settings=settings.risk)
     risk_manager = RiskManager(risk_settings=settings.risk)
-    executor = PaperTradingExecutor(
-        sqlite=sqlite,
-        sizer=sizer,
-        risk=risk_manager,
-    )
+
+    if settings.paper_trading:
+        executor = PaperTradingExecutor(
+            sqlite=sqlite,
+            sizer=sizer,
+            risk=risk_manager,
+        )
+    else:
+        from src.execution import LiveTradingExecutor
+
+        executor = LiveTradingExecutor(
+            sqlite=sqlite,
+            sizer=sizer,
+            risk=risk_manager,
+            settings=settings,
+        )
 
     return TerminalDashboard(
         settings=settings,

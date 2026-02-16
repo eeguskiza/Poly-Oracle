@@ -20,6 +20,8 @@ dependencies = [
     "scikit-learn",
     "rich",
     "questionary",
+    "py-clob-client",
+    "plotext",
 ]
 
 [project.optional-dependencies]

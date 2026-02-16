@@ -1,87 +1,89 @@
 # Poly-Oracle
 
-Multi-agent forecasting system for Polymarket prediction markets.
-Uses local LLM inference (Ollama + GPU) for zero-cost analysis.
+Sistema de forecasting multi-agente para Polymarket. LLM local (Ollama + GPU), coste cero.
 
-## Setup
+## Setup rapido
 
 ```bash
-# Install Ollama (official, with GPU support)
 curl -fsSL https://ollama.com/install.sh | sh
+ollama pull mistral && ollama pull nomic-embed-text
 
-# Pull required models
-ollama pull mistral
-ollama pull nomic-embed-text
-
-# Clone and setup
-git clone <repo-url> && cd Poly-Oracle
-python3 -m venv venv
-source venv/bin/activate
-pip install --upgrade pip
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-
-# Configure
-cp .env.example .env
-nano .env  # Add your API keys
-
-# Initialize databases
-python cli.py init
+cp .env.example .env    # meter API keys
+python cli.py init      # crear BBDDs
 ```
 
-## Usage
+## Como funciona
 
-### Interactive Dashboard (recommended)
-
-```bash
-python cli.py start
+```
+Seleccion mercados → Contexto (news+data) → Debate 4 agentes → Calibracion → Sizing Kelly → Trade
 ```
 
-Opens a local web dashboard at `http://127.0.0.1:8787` with live KPIs, positions and recent trades.
+4 agentes debaten: Bull (alcista), Bear (bajista), Devil's Advocate (desafia), Judge (decide probabilidad final). Despues se calibra con Brier scores y se ejecuta con Kelly criterion.
 
-Use terminal dashboard only when needed:
+## Dashboard terminal
 
 ```bash
-python cli.py start --terminal
+python cli.py start              # lanzar dashboard
+python cli.py start --paper      # forzar paper
+python cli.py start --live       # forzar live
 ```
 
-For live account identity/balance widgets in the web dashboard, optionally set:
-- `POLYMARKET_USERNAME`
-- `POLYMARKET_WALLET_ADDRESS`
-- (and your API keys for live mode)
+### Que hace cada opcion del menu
 
-Terminal menu includes:
-- **Start Trading** -- Autonomous paper/live trading loop
-- **Market Scanner** -- Browse and filter active markets
-- **Single Forecast** -- Run debate on one market
-- **Portfolio** -- Open positions and P&L
-- **Performance** -- Brier scores and accuracy
-- **System Status** -- Component health checks
-- **Settings** -- Current configuration
+| Opcion | Que hace |
+|--------|----------|
+| **Start Trading** | Loop autonomo: escanea mercados, debate, ejecuta trades. Corre hasta Ctrl+C |
+| **Market Scanner** | Lista mercados activos de Polymarket con precio, volumen, liquidez. Puedes lanzar forecast desde aqui |
+| **Single Forecast** | Metes un market ID, corre el debate completo y te dice si hay edge para tradear |
+| **Portfolio** | Posiciones abiertas, P&L por posicion, resumen de bankroll |
+| **Trade History** | Ultimos 30 trades ejecutados con timestamps y status |
+| **Performance** | Brier scores (raw vs calibrado), win rate, value vs market |
+| **Equity Curve** | Grafico ASCII de la evolucion del bankroll + drawdown |
+| **Backtest** | Simula trades sobre forecasts historicos resueltos |
+| **System Status** | Health check: Ollama, DuckDB, SQLite, ChromaDB, Polymarket API |
+| **Settings** | Muestra config actual (LLM, risk, data, polymarket) |
 
-### CLI Commands
+## Comandos CLI
 
 ```bash
-# Status
-python cli.py status
+# Trading
+python cli.py paper --once              # 1 ciclo paper trading
+python cli.py trade --mode crypto       # solo mercados BTC/ETH/SOL
+python cli.py trade --mode auto         # selector inteligente por viabilidad
+python cli.py trade --mode chosen --market-id <id>  # mercado especifico
+python cli.py live --once               # trading real (necesita API keys)
 
-# Markets
+# Analisis
+python cli.py forecast <id> -r 2 -v     # debate sobre un mercado
+python cli.py backtest                   # replay rapido sin LLM
+python cli.py backtest --full            # simulacion completa con LLM
+
+# Info
 python cli.py markets --sort-by trending
-python cli.py market <market_id>
-
-# Forecast
-python cli.py forecast <market_id> --rounds 2 --verbose
-
-# Paper trading (one cycle)
-python cli.py paper --once --top 5
-
-# Portfolio
 python cli.py positions
-python cli.py trades --limit 10
+python cli.py trades
+python cli.py calibration
+python cli.py status
 ```
+
+## Paper → Live
+
+No pasar a live hasta cumplir:
+
+| KPI | Minimo |
+|-----|--------|
+| Brier Score | < 0.20 |
+| Win Rate | > 50% |
+| Sharpe | > 0 |
+| Forecasts resueltos | >= 50 |
+| Max Drawdown | < 30% |
+
+Luego: meter `POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_API_PASSPHRASE` en `.env` y arrancar con `python cli.py live --once`.
 
 ## Tests
 
 ```bash
-source venv/bin/activate
-python -m pytest tests/ -q
+python -m pytest tests/ -q    # 287 tests
 ```

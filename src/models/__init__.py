@@ -21,6 +21,7 @@ from src.models.debate import (
     DebateResult,
 )
 from src.models.news import NewsItem
+from src.models.backtest import BacktestResult
 
 __all__ = [
     "Market",
@@ -42,4 +43,5 @@ __all__ = [
     "AgentResponse",
     "DebateResult",
     "NewsItem",
+    "BacktestResult",
 ]

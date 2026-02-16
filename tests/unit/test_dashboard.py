@@ -403,3 +403,146 @@ class TestCreateDashboard:
         create_dashboard()
         mock_sqlite_inst.initialize_schema.assert_called_once()
         mock_duckdb_inst.initialize_schema.assert_called_once()
+
+
+class TestSplashScreen:
+    @pytest.mark.asyncio
+    async def test_show_splash_runs_without_error(self, dashboard):
+        """_show_splash() executes without raising."""
+        with patch("src.dashboard.terminal.OllamaClient") as MockOllama:
+            mock_client = AsyncMock()
+            mock_client.is_available = AsyncMock(return_value=True)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockOllama.return_value = mock_client
+
+            with patch("src.dashboard.terminal.httpx.get") as mock_get:
+                mock_get.return_value = Mock(status_code=200)
+                await dashboard._show_splash()
+
+
+class TestTradeHistory:
+    @pytest.mark.asyncio
+    async def test_trade_history_empty(self, dashboard):
+        """_screen_trade_history() handles empty trades gracefully."""
+        dashboard.sqlite.conn.cursor.return_value.execute.return_value.fetchall.return_value = []
+        await dashboard._screen_trade_history()
+
+    @pytest.mark.asyncio
+    async def test_trade_history_with_data(self, dashboard):
+        """_screen_trade_history() displays trade rows correctly."""
+        dashboard.sqlite.conn.cursor.return_value.execute.return_value.fetchall.return_value = [
+            (1, "market_abc", "BUY_YES", 5.0, 10.0, 0.50, "2026-01-15T12:00:00Z", "FILLED"),
+            (2, "market_def", "BUY_NO", 3.0, 8.0, 0.38, "2026-01-15T13:00:00Z", "FILLED"),
+        ]
+        await dashboard._screen_trade_history()
+
+    @pytest.mark.asyncio
+    async def test_trade_history_exception(self, dashboard):
+        """_screen_trade_history() handles DB exceptions gracefully."""
+        dashboard.sqlite.conn.cursor.side_effect = Exception("DB error")
+        await dashboard._screen_trade_history()
+
+
+class TestHelpScreen:
+    @pytest.mark.asyncio
+    async def test_help_runs_without_error(self, dashboard):
+        """_screen_help() executes without raising."""
+        await dashboard._screen_help()
+
+
+class TestEquityCurveScreen:
+    @pytest.mark.asyncio
+    async def test_equity_curve_empty(self, dashboard):
+        """_screen_equity_curve() handles empty daily stats."""
+        dashboard.sqlite.conn.cursor.return_value.execute.return_value.fetchall.return_value = []
+        await dashboard._screen_equity_curve()
+
+    @pytest.mark.asyncio
+    async def test_equity_curve_with_data(self, dashboard):
+        """_screen_equity_curve() runs with data."""
+        dashboard.sqlite.conn.cursor.return_value.execute.return_value.fetchall.return_value = [
+            ("2026-01-01", 50.0),
+            ("2026-01-02", 52.0),
+            ("2026-01-03", 48.0),
+            ("2026-01-04", 55.0),
+        ]
+        await dashboard._screen_equity_curve()
+
+
+class TestBacktestScreen:
+    @pytest.mark.asyncio
+    async def test_backtest_cancel(self, dashboard):
+        """_screen_backtest() returns on cancel."""
+        with patch("src.dashboard.terminal.questionary") as mock_q:
+            mock_q.select.return_value.ask_async = AsyncMock(return_value="Cancel")
+            await dashboard._screen_backtest()
+
+
+class TestRiskAlerts:
+    def test_no_alerts_normal_state(self, dashboard):
+        """No alerts when state is healthy."""
+        dashboard.sqlite.get_current_bankroll.return_value = 50.0
+        dashboard.settings.risk.initial_bankroll = 50.0
+        dashboard.sqlite.get_open_positions.return_value = []
+        dashboard.settings.risk.max_open_positions = 8
+        alerts = dashboard._get_risk_alerts()
+        assert alerts == []
+
+    def test_alert_low_bankroll(self, dashboard):
+        """Alert when bankroll < 20% of initial."""
+        dashboard.sqlite.get_current_bankroll.return_value = 5.0
+        dashboard.settings.risk.initial_bankroll = 50.0
+        dashboard.sqlite.get_open_positions.return_value = []
+        dashboard.settings.risk.max_open_positions = 8
+        alerts = dashboard._get_risk_alerts()
+        assert any("below 20%" in a for a in alerts)
+
+    def test_alert_max_positions(self, dashboard):
+        """Alert when positions at maximum."""
+        dashboard.sqlite.get_current_bankroll.return_value = 50.0
+        dashboard.settings.risk.initial_bankroll = 50.0
+        positions = [{"amount_usd": 5, "unrealized_pnl": 0} for _ in range(8)]
+        dashboard.sqlite.get_open_positions.return_value = positions
+        dashboard.settings.risk.max_open_positions = 8
+        alerts = dashboard._get_risk_alerts()
+        assert any("maximum" in a for a in alerts)
+
+
+class TestSettingsScreen:
+    @pytest.mark.asyncio
+    async def test_settings_runs_without_error(self, dashboard):
+        """_screen_settings() executes without raising."""
+        await dashboard._screen_settings()
+
+
+class TestPerformanceScreen:
+    @pytest.mark.asyncio
+    async def test_performance_with_data(self, dashboard):
+        """_screen_performance() runs with mock data."""
+        await dashboard._screen_performance()
+
+    @pytest.mark.asyncio
+    async def test_performance_no_data(self, dashboard):
+        """_screen_performance() handles no resolved forecasts."""
+        dashboard.feedback.get_performance_summary.return_value = {
+            "resolved_forecasts": 0,
+            "total_forecasts": 0,
+        }
+        await dashboard._screen_performance()
+
+
+class TestSystemStatusScreen:
+    @pytest.mark.asyncio
+    async def test_system_status_runs(self, dashboard):
+        """_screen_system_status() executes without raising."""
+        with patch("src.dashboard.terminal.OllamaClient") as MockOllama:
+            mock_client = AsyncMock()
+            mock_client.is_available = AsyncMock(return_value=True)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockOllama.return_value = mock_client
+
+            with patch("src.dashboard.terminal.httpx.get") as mock_get:
+                mock_get.return_value = Mock(status_code=200)
+                await dashboard._screen_system_status()

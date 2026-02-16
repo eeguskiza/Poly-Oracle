@@ -1,5 +1,3 @@
-from src.dashboard.web import run_web_dashboard
-
 try:
     from src.dashboard.terminal import TerminalDashboard, create_dashboard
 except ModuleNotFoundError:  # Optional terminal dependency (questionary/rich)
@@ -9,5 +7,4 @@ except ModuleNotFoundError:  # Optional terminal dependency (questionary/rich)
 __all__ = [
     "TerminalDashboard",
     "create_dashboard",
-    "run_web_dashboard",
 ]

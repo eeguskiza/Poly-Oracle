@@ -65,26 +65,24 @@ class TradeMode(str, Enum):
 
 @app.command()
 def start(
-    terminal: bool = typer.Option(False, "--terminal", help="Run legacy terminal dashboard"),
-    host: str = typer.Option("127.0.0.1", help="Host for web dashboard"),
-    port: int = typer.Option(8787, help="Port for web dashboard"),
+    paper: bool = typer.Option(False, "--paper", help="Force paper trading mode"),
+    live: bool = typer.Option(False, "--live", help="Force live trading mode"),
 ) -> None:
-    """Launch dashboard (web by default, terminal optional)."""
-    if terminal:
-        from src.dashboard.terminal import create_dashboard
-
-        dashboard = create_dashboard()
-        asyncio.run(dashboard.run())
-        return
+    """Launch interactive terminal dashboard."""
+    if paper and live:
+        typer.echo("Error: --paper and --live are mutually exclusive.", err=True)
+        raise typer.Exit(code=1)
 
     settings = get_settings()
-    setup_logging(settings.log_level, settings.database.db_dir / "logs")
+    if paper:
+        settings.paper_trading = True
+    elif live:
+        settings.paper_trading = False
 
-    from src.dashboard.web import run_web_dashboard
+    from src.dashboard.terminal import create_dashboard
 
-    typer.echo(f"Starting Poly-Oracle web dashboard on http://{host}:{port}")
-    typer.echo("Use Ctrl+C to stop. Use --terminal for legacy interactive menu.")
-    run_web_dashboard(settings=settings, host=host, port=port)
+    dashboard = create_dashboard()
+    asyncio.run(dashboard.run())
 
 
 @app.command()
@@ -720,16 +718,13 @@ def trade(
     setup_logging(settings.log_level, settings.database.db_dir / "logs")
 
     if mode == TradeMode.auto:
-        typer.echo("Mode selected: AUTO MARKETS")
-        paper(once=once, interval=interval, top_markets=top_markets)
+        typer.echo("Mode selected: AUTO MARKETS (viability selector)")
+        paper(once=once, interval=interval, top_markets=top_markets, selector="viability")
         return
 
     if mode == TradeMode.crypto:
-        typer.echo("Mode selected: CRYPTO (Sprint 1 UX shell)")
-        typer.echo(
-            "Universe: BTC/ETH/SOL. Running current paper loop while crypto-specific selector is built."
-        )
-        paper(once=once, interval=interval, top_markets=top_markets)
+        typer.echo("Mode selected: CRYPTO (BTC/ETH/SOL)")
+        paper(once=once, interval=interval, top_markets=top_markets, selector="crypto")
         return
 
     # Chosen market flow
@@ -886,9 +881,84 @@ def _manual_resolve(
 
 
 @app.command()
-def backtest() -> None:
-    """Run historical calibration."""
-    typer.echo("Command not yet implemented")
+def backtest(
+    full: bool = typer.Option(False, "--full", help="Full simulation with LLM (slow)"),
+    date_from: str = typer.Option(None, "--from", help="Start date (YYYY-MM-DD)"),
+    date_to: str = typer.Option(None, "--to", help="End date (YYYY-MM-DD)"),
+) -> None:
+    """
+    Run backtest on historical resolved forecasts.
+
+    Default mode replays existing forecasts (fast, no LLM).
+    Use --full to re-run the debate pipeline (slow, needs Ollama).
+
+    Example:
+        python cli.py backtest
+        python cli.py backtest --full
+        python cli.py backtest --from 2026-01-01 --to 2026-02-01
+    """
+    from src.data.storage.duckdb_client import DuckDBClient
+    from src.calibration.backtester import Backtester
+
+    try:
+        settings = get_settings()
+        setup_logging(settings.log_level, settings.database.db_dir / "logs")
+
+        with DuckDBClient(settings.database.duckdb_path) as duckdb_client:
+            bt = Backtester(duckdb=duckdb_client, settings=settings)
+
+            if full:
+                typer.echo("Running FULL backtest (re-running LLM debates)...")
+
+                async def _run_full():
+                    from src.data.sources.polymarket import PolymarketClient
+                    from src.data.sources.news import NewsClient
+                    from src.data.storage.chroma_client import ChromaClient
+
+                    async with PolymarketClient() as poly, NewsClient() as news:
+                        with ChromaClient(settings.database.chroma_path, settings.llm.embedding_model) as chroma:
+                            return await bt.run_full(
+                                polymarket=poly, news_client=news, chroma=chroma,
+                                date_from=date_from, date_to=date_to,
+                            )
+
+                result = asyncio.run(_run_full())
+            else:
+                typer.echo("Running REPLAY backtest (fast, no LLM)...")
+                result = bt.run_replay(date_from=date_from, date_to=date_to)
+
+        if result.total_forecasts == 0:
+            typer.echo("No resolved forecasts found. Run forecasts and wait for resolution first.")
+            return
+
+        typer.echo(f"\n{'=' * 80}")
+        typer.echo("BACKTEST RESULTS")
+        typer.echo("=" * 80)
+        typer.echo(f"Forecasts:       {result.total_forecasts}")
+        typer.echo(f"Simulated Trades:{result.simulated_trades}")
+        typer.echo(f"Final Equity:    ${result.final_equity:.2f}")
+        typer.echo(f"Max Drawdown:    {result.max_drawdown:.1%}")
+        if result.sharpe_ratio is not None:
+            typer.echo(f"Sharpe Ratio:    {result.sharpe_ratio:.2f}")
+        typer.echo(f"Win Rate:        {result.win_rate:.1%}")
+        typer.echo(f"Brier Score:     {result.brier_score:.4f}")
+        typer.echo("=" * 80)
+
+        if result.trade_log:
+            typer.echo(f"\nTrade Log (showing last 10):")
+            typer.echo(f"{'Market':<25} {'Dir':<8} {'Bet':>8} {'P&L':>8} {'Outcome':>8}")
+            typer.echo("-" * 60)
+            for t in result.trade_log[-10:]:
+                outcome_str = "WIN" if t["pnl"] > 0 else "LOSS"
+                typer.echo(
+                    f"{t['market_id'][:25]:<25} {t['direction']:<8} "
+                    f"${t['bet']:>7.2f} ${t['pnl']:>+7.2f} {outcome_str:>8}"
+                )
+
+    except Exception as e:
+        typer.echo(f"Backtest failed: {e}", err=True)
+        logger.exception("Backtest failed")
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -896,6 +966,7 @@ def paper(
     once: bool = typer.Option(False, "--once", help="Run one cycle and exit"),
     interval: int = typer.Option(60, "--interval", "-i", help="Minutes between cycles (if not --once)"),
     top_markets: int = typer.Option(5, "--top", "-n", help="Number of top markets to analyze per cycle"),
+    selector: str = typer.Option("viability", hidden=True, help="Market selector: viability or crypto"),
 ) -> None:
     """
     Run in paper trading mode.
@@ -920,6 +991,7 @@ def paper(
     from src.calibration import CalibratorAgent, MetaAnalyzer, FeedbackLoop
     from src.calibration.resolver import MarketResolver
     from src.execution import PositionSizer, RiskManager, PaperTradingExecutor
+    from src.data.selectors import CryptoSelector, ViabilitySelector
     from src.utils.exceptions import LLMError
 
     settings = get_settings()
@@ -1017,25 +1089,27 @@ def paper(
                     )
                 else:
                     # PHASE 2: Find new trading opportunities
-                    typer.echo(f"\nPHASE 2: Fetching active markets...")
+                    typer.echo(f"\nPHASE 2: Selecting markets (selector={selector})...")
 
-                    markets = await poly_client.get_active_markets()
-
-                    # Filter by liquidity
-                    filtered_markets = [
-                        m for m in markets
-                        if m.liquidity >= settings.risk.min_liquidity
-                    ]
-
-                    # Sort by liquidity and take top N
-                    filtered_markets.sort(key=lambda m: m.liquidity, reverse=True)
-                    target_markets = filtered_markets[:top_markets]
-
-                    typer.echo(
-                        f"Found {len(markets)} active markets, "
-                        f"{len(filtered_markets)} with sufficient liquidity, "
-                        f"analyzing top {len(target_markets)}"
-                    )
+                    if selector == "crypto":
+                        crypto_sel = CryptoSelector()
+                        target_markets = await crypto_sel.select_markets(
+                            poly_client, top_n=top_markets
+                        )
+                        typer.echo(
+                            f"CryptoSelector found {len(target_markets)} crypto markets"
+                        )
+                    else:
+                        viability_sel = ViabilitySelector(settings)
+                        ranked = await viability_sel.select_markets(
+                            poly_client, top_n=top_markets
+                        )
+                        target_markets = [m for m, _score, reasons in ranked if not reasons]
+                        excluded = [m for m, _score, reasons in ranked if reasons]
+                        typer.echo(
+                            f"ViabilitySelector: {len(target_markets)} viable, "
+                            f"{len(excluded)} excluded, analyzing top {len(target_markets)}"
+                        )
 
                     # Process each market
                     for idx, market in enumerate(target_markets, 1):
@@ -1168,9 +1242,197 @@ def paper(
 
 
 @app.command()
-def live() -> None:
-    """Run in live trading mode."""
-    typer.echo("Command not yet implemented")
+def live(
+    once: bool = typer.Option(False, "--once", help="Run one cycle and exit"),
+    interval: int = typer.Option(60, "--interval", "-i", help="Minutes between cycles"),
+    top_markets: int = typer.Option(5, "--top", "-n", help="Markets to analyze per cycle"),
+) -> None:
+    """
+    Run in LIVE trading mode (real money on Polymarket).
+
+    Requires POLYMARKET_API_KEY, POLYMARKET_API_SECRET, and
+    POLYMARKET_API_PASSPHRASE in your .env file.
+    """
+    import time as _time
+    from src.agents import create_debate_system
+    from src.agents.base import OllamaClient
+    from src.data.sources.polymarket import PolymarketClient
+    from src.data.sources.news import NewsClient
+    from src.data.context import ContextBuilder
+    from src.data.storage.chroma_client import ChromaClient
+    from src.data.storage.duckdb_client import DuckDBClient
+    from src.data.storage.sqlite_client import SQLiteClient
+    from src.calibration import CalibratorAgent, MetaAnalyzer, FeedbackLoop
+    from src.calibration.resolver import MarketResolver
+    from src.execution import PositionSizer, RiskManager, LiveTradingExecutor
+    from src.data.selectors import ViabilitySelector
+    from src.utils.exceptions import LLMError
+
+    settings = get_settings()
+    setup_logging(settings.log_level, settings.database.db_dir / "logs")
+
+    # Validate credentials up-front
+    ps = settings.polymarket
+    if not all([ps.api_key, ps.api_secret, ps.api_passphrase]):
+        typer.echo(
+            "Error: Polymarket API credentials are missing.\n"
+            "Set POLYMARKET_API_KEY, POLYMARKET_API_SECRET, "
+            "and POLYMARKET_API_PASSPHRASE in your .env file.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    settings.paper_trading = False
+
+    # Confirmation prompt
+    typer.echo("\n*** LIVE TRADING MODE ***")
+    typer.echo("Real orders will be submitted to Polymarket.")
+    confirm = typer.confirm("Do you want to proceed?", default=False)
+    if not confirm:
+        typer.echo("Aborted.")
+        raise typer.Exit(code=0)
+
+    async def run_cycle() -> None:
+        cycle_start = _time.time()
+        trades_executed = 0
+
+        typer.echo(f"\n{'=' * 80}")
+        typer.echo(f"LIVE TRADING CYCLE - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        typer.echo("=" * 80)
+
+        with SQLiteClient(settings.database.sqlite_path) as sqlite_client, \
+             DuckDBClient(settings.database.duckdb_path) as duckdb_client:
+
+            sqlite_client.initialize_schema()
+            sqlite_client.seed_initial_bankroll(settings.risk.initial_bankroll)
+
+            calibrator = CalibratorAgent(history_db=duckdb_client)
+            analyzer = MetaAnalyzer(
+                min_edge=settings.risk.min_edge,
+                min_confidence=0.6,
+                min_liquidity=settings.risk.min_liquidity,
+            )
+            feedback = FeedbackLoop(db=duckdb_client, calibrator=calibrator)
+
+            sizer = PositionSizer(risk_settings=settings.risk)
+            risk_manager = RiskManager(risk_settings=settings.risk)
+            executor = LiveTradingExecutor(
+                sqlite=sqlite_client,
+                sizer=sizer,
+                risk=risk_manager,
+                settings=settings,
+            )
+
+            async with PolymarketClient() as poly_client, \
+                       NewsClient() as news_client:
+
+                # Resolution
+                resolver = MarketResolver(
+                    polymarket=poly_client, feedback=feedback,
+                    sqlite=sqlite_client, duckdb=duckdb_client,
+                )
+                resolution = await resolver.run_resolution_cycle()
+                if resolution["resolved"] > 0:
+                    typer.echo(f"Resolved {resolution['resolved']} markets. P&L: {resolution['pnl']:+.2f}")
+
+                bankroll = sqlite_client.get_current_bankroll()
+                typer.echo(f"Bankroll: ${bankroll:.2f}")
+
+                # LLM check
+                async with OllamaClient(
+                    base_url=settings.llm.base_url,
+                    model=settings.llm.model,
+                    timeout=120,
+                ) as test_ollama:
+                    if not await test_ollama.is_available():
+                        typer.echo("LLM unavailable, skipping analysis.")
+                        return
+
+                # Market selection
+                viability_sel = ViabilitySelector(settings)
+                ranked = await viability_sel.select_markets(poly_client, top_n=top_markets)
+                target_markets = [m for m, _s, reasons in ranked if not reasons]
+                typer.echo(f"Analyzing {len(target_markets)} markets...")
+
+                for idx, mkt in enumerate(target_markets, 1):
+                    typer.echo(f"\n[{idx}/{len(target_markets)}] {mkt.question[:60]}...")
+                    try:
+                        with ChromaClient(settings.database.chroma_path, settings.llm.embedding_model) as chroma:
+                            builder = ContextBuilder(
+                                polymarket_client=poly_client,
+                                news_client=news_client,
+                                chroma_client=chroma,
+                            )
+                            context_text = await builder.build_context(mkt)
+
+                        orchestrator, ollama = create_debate_system(
+                            base_url=settings.llm.base_url,
+                            model=settings.llm.model,
+                            timeout=settings.llm.timeout,
+                        )
+                        try:
+                            forecast_result = await orchestrator.run_debate(
+                                market_id=mkt.id, context=context_text,
+                                rounds=1, temperature=0.7, verbose=False,
+                            )
+                            confidence = forecast_result.compute_confidence()
+                            calibrated = calibrator.calibrate(
+                                raw_forecast=forecast_result.probability,
+                                market_type=mkt.market_type,
+                                confidence=confidence,
+                            )
+                            edge_analysis = analyzer.analyze(
+                                our_forecast=calibrated,
+                                market_price=mkt.current_price,
+                                liquidity=mkt.liquidity,
+                            )
+                            feedback.record_forecast(
+                                forecast=forecast_result, market=mkt,
+                                calibrated_probability=calibrated.calibrated,
+                                edge=edge_analysis.raw_edge,
+                                recommended_action=edge_analysis.recommended_action,
+                            )
+
+                            typer.echo(f"  Forecast: {calibrated.calibrated:.1%} | Edge: {edge_analysis.raw_edge:+.1%}")
+
+                            if edge_analysis.recommended_action == "TRADE":
+                                exec_result = await executor.execute(
+                                    edge_analysis=edge_analysis,
+                                    calibrated_probability=calibrated.calibrated,
+                                    market=mkt, bankroll=bankroll,
+                                )
+                                if exec_result and exec_result.success:
+                                    trades_executed += 1
+                                    typer.echo(f"  LIVE TRADE: {exec_result.message}")
+                                elif exec_result:
+                                    typer.echo(f"  Rejected: {exec_result.message}")
+                        finally:
+                            await ollama.close()
+                    except LLMError as e:
+                        typer.echo(f"  LLM error: {e}")
+                    except Exception as e:
+                        typer.echo(f"  Error: {e}")
+                        logger.error(f"Error processing {mkt.id}: {e}")
+
+        duration = _time.time() - cycle_start
+        typer.echo(f"\nCycle done: {trades_executed} trades in {duration:.1f}s")
+
+    try:
+        if once:
+            asyncio.run(run_cycle())
+        else:
+            typer.echo(f"Continuous live trading (interval: {interval}m). Ctrl+C to stop.")
+            while True:
+                asyncio.run(run_cycle())
+                typer.echo(f"Sleeping {interval} minutes...")
+                import time as _t
+                _t.sleep(interval * 60)
+    except KeyboardInterrupt:
+        typer.echo("\nLive trading stopped.")
+    except Exception as e:
+        typer.echo(f"Error: {e}", err=True)
+        logger.exception("Live trading failed")
+        raise typer.Exit(code=1)
 
 
 @app.command()
