@@ -36,7 +36,20 @@ python cli.py init
 python cli.py start
 ```
 
-Opens an interactive menu with:
+Opens a local web dashboard at `http://127.0.0.1:8787` with live KPIs, positions and recent trades.
+
+Use terminal dashboard only when needed:
+
+```bash
+python cli.py start --terminal
+```
+
+For live account identity/balance widgets in the web dashboard, optionally set:
+- `POLYMARKET_USERNAME`
+- `POLYMARKET_WALLET_ADDRESS`
+- (and your API keys for live mode)
+
+Terminal menu includes:
 - **Start Trading** -- Autonomous paper/live trading loop
 - **Market Scanner** -- Browse and filter active markets
 - **Single Forecast** -- Run debate on one market

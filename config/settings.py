@@ -48,6 +48,8 @@ class PolymarketSettings(BaseSettings):
     api_key: Optional[str] = Field(default=None, alias="POLYMARKET_API_KEY")
     api_secret: Optional[str] = Field(default=None, alias="POLYMARKET_API_SECRET")
     api_passphrase: Optional[str] = Field(default=None, alias="POLYMARKET_API_PASSPHRASE")
+    username: Optional[str] = Field(default=None, alias="POLYMARKET_USERNAME")
+    wallet_address: Optional[str] = Field(default=None, alias="POLYMARKET_WALLET_ADDRESS")
     clob_url: str = "https://clob.polymarket.com"
     gamma_url: str = "https://gamma-api.polymarket.com"
 
