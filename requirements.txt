@@ -5,6 +5,11 @@ pydantic-settings
 httpx
 duckdb
 chromadb
+feedparser
+pyyaml
+scikit-learn
+rich
+questionary
 pytest
 pytest-asyncio
 pytest-cov

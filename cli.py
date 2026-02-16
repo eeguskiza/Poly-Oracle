@@ -38,6 +38,7 @@ import asyncio
 import httpx
 import typer
 from datetime import datetime
+from enum import Enum
 from loguru import logger
 
 from config.settings import get_settings
@@ -54,12 +55,36 @@ from src.models import MarketFilter
 app = typer.Typer(no_args_is_help=True)
 
 
+class TradeMode(str, Enum):
+    """Supported high-level trading entrypoints for Sprint 1 UX."""
+
+    crypto = "crypto"
+    auto = "auto"
+    chosen = "chosen"
+
+
 @app.command()
-def start() -> None:
-    """Launch interactive terminal dashboard."""
-    from src.dashboard.terminal import create_dashboard
-    dashboard = create_dashboard()
-    asyncio.run(dashboard.run())
+def start(
+    terminal: bool = typer.Option(False, "--terminal", help="Run legacy terminal dashboard"),
+    host: str = typer.Option("127.0.0.1", help="Host for web dashboard"),
+    port: int = typer.Option(8787, help="Port for web dashboard"),
+) -> None:
+    """Launch dashboard (web by default, terminal optional)."""
+    if terminal:
+        from src.dashboard.terminal import create_dashboard
+
+        dashboard = create_dashboard()
+        asyncio.run(dashboard.run())
+        return
+
+    settings = get_settings()
+    setup_logging(settings.log_level, settings.database.db_dir / "logs")
+
+    from src.dashboard.web import run_web_dashboard
+
+    typer.echo(f"Starting Poly-Oracle web dashboard on http://{host}:{port}")
+    typer.echo("Use Ctrl+C to stop. Use --terminal for legacy interactive menu.")
+    run_web_dashboard(settings=settings, host=host, port=port)
 
 
 @app.command()
@@ -662,6 +687,66 @@ def forecast(
         typer.echo(f"Error: {e}", err=True)
         logger.exception("Forecast command failed")
         raise typer.Exit(code=1)
+
+
+@app.command()
+def trade(
+    mode: TradeMode = typer.Option(
+        TradeMode.auto,
+        "--mode",
+        "-m",
+        help="Trading mode: auto, crypto, or chosen",
+    ),
+    market_id: str | None = typer.Option(
+        None,
+        "--market-id",
+        help="Required for --mode chosen",
+    ),
+    once: bool = typer.Option(True, "--once/--loop", help="Run one cycle or continuous loop"),
+    interval: int = typer.Option(60, "--interval", "-i", help="Minutes between cycles (loop mode)"),
+    top_markets: int = typer.Option(5, "--top", "-n", help="Markets to analyze per cycle"),
+    rounds: int = typer.Option(2, "--rounds", "-r", help="Debate rounds for chosen mode"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose debate output in chosen mode"),
+) -> None:
+    """
+    Unified trading entrypoint (Sprint 1).
+
+    Modes:
+    - auto: Existing autonomous market scanner + paper execution loop
+    - crypto: Sprint 1 UX branch for BTC/ETH/SOL-focused workflow (routes to paper for now)
+    - chosen: Analyze one specific market end-to-end forecast flow
+    """
+    settings = get_settings()
+    setup_logging(settings.log_level, settings.database.db_dir / "logs")
+
+    if mode == TradeMode.auto:
+        typer.echo("Mode selected: AUTO MARKETS")
+        paper(once=once, interval=interval, top_markets=top_markets)
+        return
+
+    if mode == TradeMode.crypto:
+        typer.echo("Mode selected: CRYPTO (Sprint 1 UX shell)")
+        typer.echo(
+            "Universe: BTC/ETH/SOL. Running current paper loop while crypto-specific selector is built."
+        )
+        paper(once=once, interval=interval, top_markets=top_markets)
+        return
+
+    # Chosen market flow
+    if market_id is None:
+        typer.echo("--market-id is required for --mode chosen", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo("Mode selected: CHOSEN MARKET")
+    typer.echo("Phase 1/3 - Info gathering")
+    typer.echo("Phase 2/3 - Debate")
+    typer.echo("Phase 3/3 - Decision output")
+    forecast(
+        market_id=market_id,
+        rounds=rounds,
+        verbose=verbose,
+        temperature=settings.llm.temperature,
+    )
 
 
 @app.command()
