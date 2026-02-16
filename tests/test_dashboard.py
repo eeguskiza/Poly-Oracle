@@ -3,7 +3,12 @@ from datetime import datetime, timezone
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 from pathlib import Path
 
-from src.dashboard.terminal import TerminalDashboard, create_dashboard
+from src.dashboard.terminal import (
+    TerminalDashboard,
+    create_dashboard,
+    MAIN_MENU_CHOICES,
+    ADVANCED_MENU_CHOICES,
+)
 
 
 @pytest.fixture
@@ -546,3 +551,143 @@ class TestSystemStatusScreen:
             with patch("src.dashboard.terminal.httpx.get") as mock_get:
                 mock_get.return_value = Mock(status_code=200)
                 await dashboard._screen_system_status()
+
+
+class TestMainMenu:
+    def test_main_menu_has_5_choices(self):
+        """Main menu should have exactly 5 options."""
+        assert len(MAIN_MENU_CHOICES) == 5
+
+    def test_main_menu_options(self):
+        """Main menu contains the expected options."""
+        labels = [c.split(" - ")[0].strip() for c in MAIN_MENU_CHOICES]
+        assert "Auto Trading (Crypto)" in labels
+        assert "Auto Trading (All)" in labels
+        assert "Portfolio" in labels
+        assert "Advanced" in labels
+        assert "Exit" in labels
+
+    def test_auto_trading_crypto_is_first(self):
+        """Auto Trading (Crypto) should be the first option."""
+        assert MAIN_MENU_CHOICES[0].startswith("Auto Trading (Crypto)")
+
+
+class TestAdvancedMenu:
+    def test_advanced_menu_has_9_choices(self):
+        """Advanced menu should have exactly 9 options (8 screens + Back)."""
+        assert len(ADVANCED_MENU_CHOICES) == 9
+
+    def test_advanced_menu_options(self):
+        """Advanced menu contains all expected options."""
+        labels = [c.split(" - ")[0].strip() for c in ADVANCED_MENU_CHOICES]
+        assert "Market Scanner" in labels
+        assert "Single Forecast" in labels
+        assert "Trade History" in labels
+        assert "Performance" in labels
+        assert "Equity Curve" in labels
+        assert "Backtest" in labels
+        assert "System Status" in labels
+        assert "Settings" in labels
+        assert "Back" in labels
+
+    def test_back_is_last(self):
+        """Back should be the last option in the advanced menu."""
+        assert ADVANCED_MENU_CHOICES[-1] == "Back"
+
+
+class TestAutoTrading:
+    @pytest.mark.asyncio
+    async def test_auto_trading_crypto_stops_if_ollama_unavailable(self, dashboard):
+        """Auto trading returns early when Ollama is not available."""
+        with patch("src.dashboard.terminal.OllamaClient") as MockOllama:
+            mock_client = AsyncMock()
+            mock_client.is_available = AsyncMock(return_value=False)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockOllama.return_value = mock_client
+
+            await dashboard._screen_auto_trading("crypto")
+            # Should return without entering the loop — no resolution calls
+            dashboard.resolver.run_resolution_cycle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_auto_trading_all_stops_if_ollama_unavailable(self, dashboard):
+        """Auto trading (all) returns early when Ollama is not available."""
+        with patch("src.dashboard.terminal.OllamaClient") as MockOllama:
+            mock_client = AsyncMock()
+            mock_client.is_available = AsyncMock(return_value=False)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockOllama.return_value = mock_client
+
+            await dashboard._screen_auto_trading("all")
+            dashboard.resolver.run_resolution_cycle.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_auto_trading_crypto_uses_crypto_selector(self, dashboard):
+        """Auto trading crypto mode uses CryptoSelector."""
+        with patch("src.dashboard.terminal.OllamaClient") as MockOllama:
+            mock_client = AsyncMock()
+            mock_client.is_available = AsyncMock(return_value=True)
+            mock_client.can_generate = AsyncMock(return_value=True)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockOllama.return_value = mock_client
+
+            with patch("src.data.selectors.CryptoSelector") as MockSelector:
+                mock_sel_instance = MockSelector.return_value
+                mock_sel_instance.select_markets = AsyncMock(return_value=[])
+
+                # Simulate KeyboardInterrupt after first cycle's market scan
+                dashboard.resolver.run_resolution_cycle = AsyncMock(
+                    return_value={"checked": 0, "resolved": 0, "pnl": 0.0}
+                )
+
+                # The loop will run one cycle, find 0 markets, then hit Live display.
+                # We raise KeyboardInterrupt to exit the loop.
+                original_Live = None
+                with patch("src.dashboard.terminal.Live", side_effect=KeyboardInterrupt):
+                    await dashboard._screen_auto_trading("crypto")
+
+                mock_sel_instance.select_markets.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_auto_trading_all_uses_viability_selector(self, dashboard):
+        """Auto trading all mode uses ViabilitySelector."""
+        with patch("src.dashboard.terminal.OllamaClient") as MockOllama:
+            mock_client = AsyncMock()
+            mock_client.is_available = AsyncMock(return_value=True)
+            mock_client.can_generate = AsyncMock(return_value=True)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockOllama.return_value = mock_client
+
+            with patch("src.data.selectors.ViabilitySelector") as MockSelector:
+                mock_sel_instance = MockSelector.return_value
+                mock_sel_instance.select_markets = AsyncMock(return_value=[])
+
+                dashboard.resolver.run_resolution_cycle = AsyncMock(
+                    return_value={"checked": 0, "resolved": 0, "pnl": 0.0}
+                )
+
+                with patch("src.dashboard.terminal.Live", side_effect=KeyboardInterrupt):
+                    await dashboard._screen_auto_trading("all")
+
+                mock_sel_instance.select_markets.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_start_trading_redirects_to_auto_all(self, dashboard):
+        """_screen_start_trading() delegates to _screen_auto_trading('all')."""
+        dashboard._screen_auto_trading = AsyncMock()
+        await dashboard._screen_start_trading()
+        dashboard._screen_auto_trading.assert_called_once_with("all")
+
+
+class TestAdvancedMenuNavigation:
+    @pytest.mark.asyncio
+    async def test_advanced_menu_back_returns(self, dashboard):
+        """Selecting 'Back' in advanced menu returns to main."""
+        with patch("src.dashboard.terminal.questionary") as mock_q:
+            mock_q.select.return_value.ask_async = AsyncMock(return_value="Back")
+            await dashboard._run_advanced_menu("PAPER MODE")
+            # Should return without error

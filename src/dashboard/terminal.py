@@ -41,19 +41,24 @@ from src.utils.exceptions import LLMError
 
 console = Console()
 
-MENU_CHOICES = [
-    "Start Trading       - Launch autonomous trading loop",
+MAIN_MENU_CHOICES = [
+    "Auto Trading (Crypto) - Autonomous BTC/ETH/SOL every 15 min",
+    "Auto Trading (All)    - Autonomous all viable markets",
+    "Portfolio             - Positions and P&L",
+    "Advanced              - Scanner, backtest, settings...",
+    "Exit",
+]
+
+ADVANCED_MENU_CHOICES = [
     "Market Scanner      - Browse active markets",
     "Single Forecast     - Run debate on one market",
-    "Portfolio           - Positions and P&L",
     "Trade History       - Recent executed trades",
     "Performance         - Brier score and accuracy",
     "Equity Curve        - Portfolio value over time",
     "Backtest            - Historical simulation",
     "System Status       - Component health",
     "Settings            - Current configuration",
-    "Help                - About Poly-Oracle",
-    "Exit",
+    "Back",
 ]
 
 
@@ -171,7 +176,7 @@ class TerminalDashboard:
                 console.print()
                 choice = await questionary.select(
                     f"Poly-Oracle [{mode}] - Main Menu",
-                    choices=MENU_CHOICES,
+                    choices=MAIN_MENU_CHOICES,
                     qmark=">>",
                     pointer=">",
                 ).ask_async()
@@ -179,6 +184,36 @@ class TerminalDashboard:
                 if choice is None or choice.startswith("Exit"):
                     console.print("[bold]Exiting Poly-Oracle.[/bold]")
                     break
+
+                label = choice.split(" - ")[0].strip()
+
+                if label == "Auto Trading (Crypto)":
+                    await self._screen_auto_trading("crypto")
+                elif label == "Auto Trading (All)":
+                    await self._screen_auto_trading("all")
+                elif label == "Portfolio":
+                    await self._screen_portfolio()
+                elif label == "Advanced":
+                    await self._run_advanced_menu(mode)
+
+            except KeyboardInterrupt:
+                console.print("\n[bold]Exiting Poly-Oracle.[/bold]")
+                break
+
+    async def _run_advanced_menu(self, mode: str) -> None:
+        """Advanced submenu loop. 'Back' returns to main menu."""
+        while True:
+            try:
+                console.print()
+                choice = await questionary.select(
+                    f"Poly-Oracle [{mode}] - Advanced",
+                    choices=ADVANCED_MENU_CHOICES,
+                    qmark=">>",
+                    pointer=">",
+                ).ask_async()
+
+                if choice is None or choice.startswith("Back"):
+                    return
 
                 action = choice.split(" - ")[0].strip().lower().replace(" ", "_")
                 handler = getattr(self, f"_screen_{action}", None)
@@ -188,26 +223,25 @@ class TerminalDashboard:
                     console.print(f"[yellow]Unknown action: {action}[/yellow]")
 
             except KeyboardInterrupt:
-                console.print("\n[bold]Exiting Poly-Oracle.[/bold]")
-                break
+                return
 
     # ------------------------------------------------------------------
-    # Start Trading
+    # Auto Trading (main entry point)
     # ------------------------------------------------------------------
-    async def _screen_start_trading(self) -> None:
-        interval_str = await questionary.text(
-            "Interval between cycles (minutes):", default="60"
-        ).ask_async()
-        if interval_str is None:
-            return
-        interval = int(interval_str)
+    async def _screen_auto_trading(self, mode: str = "crypto") -> None:
+        """Fully autonomous trading loop. No user prompts.
 
-        top_str = await questionary.text(
-            "Max markets per cycle:", default="8"
-        ).ask_async()
-        if top_str is None:
-            return
-        top_markets = int(top_str)
+        Args:
+            mode: "crypto" (BTC/ETH/SOL, 15 min) or "all" (viability selector, 60 min).
+        """
+        if mode == "crypto":
+            interval = 15
+            top_markets = 5
+            mode_label = "Crypto"
+        else:
+            interval = 60
+            top_markets = 5
+            mode_label = "All Markets"
 
         # Pre-flight LLM check
         try:
@@ -244,7 +278,7 @@ class TerminalDashboard:
             "skipped": 0,
         }
 
-        mode = "PAPER MODE" if self.settings.paper_trading else "LIVE MODE"
+        trading_mode = "PAPER MODE" if self.settings.paper_trading else "LIVE MODE"
 
         def _build_display(next_cycle_at: float) -> Table:
             now = time.time()
@@ -274,9 +308,13 @@ class TerminalDashboard:
 
             # Title
             status_text = Text()
-            status_text.append(f"Poly-Oracle - Autonomous Trading [{mode}]\n", style="bold cyan")
             status_text.append(
-                f"Status: Running | Cycle: {stats['cycle']} | Uptime: {uptime_str}"
+                f"Poly-Oracle - Auto Trading [{mode_label}] [{trading_mode}]\n",
+                style="bold cyan",
+            )
+            status_text.append(
+                f"Status: Running | Cycle: {stats['cycle']} | "
+                f"Interval: {interval}m | Uptime: {uptime_str}"
             )
             grid.add_row(status_text)
             grid.add_row("")
@@ -345,6 +383,10 @@ class TerminalDashboard:
             activity_log.append(entry)
 
         # ---- autonomous loop ----
+        console.print(
+            f"\n[bold cyan]Starting Auto Trading [{mode_label}] "
+            f"— {interval} min cycles, top {top_markets} markets[/bold cyan]\n"
+        )
         try:
             while True:
                 stats["cycle"] += 1
@@ -367,17 +409,25 @@ class TerminalDashboard:
                 except Exception as exc:
                     _log("ERROR", f"Resolution failed: {exc}")
 
-                # Phase 2: Fetch & analyze markets
+                # Phase 2: Select markets using the appropriate selector
                 try:
-                    all_markets = await self.polymarket.get_active_markets()
-                    filtered = [
-                        m
-                        for m in all_markets
-                        if m.liquidity >= self.settings.risk.min_liquidity
-                    ]
-                    filtered.sort(key=lambda m: m.liquidity, reverse=True)
-                    targets = filtered[:top_markets]
-                    stats["scanned"] += len(all_markets)
+                    if mode == "crypto":
+                        from src.data.selectors import CryptoSelector
+
+                        selector = CryptoSelector()
+                        targets = await selector.select_markets(
+                            self.polymarket, top_n=top_markets
+                        )
+                        stats["scanned"] += len(targets)
+                    else:
+                        from src.data.selectors import ViabilitySelector
+
+                        selector = ViabilitySelector(settings=self.settings)
+                        scored = await selector.select_markets(
+                            self.polymarket, top_n=top_markets
+                        )
+                        targets = [m for m, score, reasons in scored if not reasons]
+                        stats["scanned"] += len(scored)
 
                     bankroll = self.sqlite.get_current_bankroll()
 
@@ -471,6 +521,10 @@ class TerminalDashboard:
 
         except KeyboardInterrupt:
             console.print("\n[bold]Trading loop stopped. Returning to menu.[/bold]")
+
+    async def _screen_start_trading(self) -> None:
+        """Legacy entry point — redirects to auto trading (all markets)."""
+        await self._screen_auto_trading("all")
 
     # ------------------------------------------------------------------
     # Market Scanner
@@ -1067,17 +1121,21 @@ class TerminalDashboard:
             "  Calibration   : Brier scoring, isotonic regression, feedback loops\n"
             "  Execution     : Kelly criterion sizing, risk management, paper/live trading\n"
             "\n"
-            "[bold]Dashboard Menu[/bold]\n"
-            "  Start Trading  - Launch the autonomous scan-forecast-trade loop\n"
-            "  Market Scanner - Browse and filter active Polymarket markets\n"
-            "  Single Forecast- Run a multi-agent debate on a specific market\n"
-            "  Portfolio      - View open positions and P&L summary\n"
-            "  Trade History  - See recently executed trades\n"
-            "  Performance    - Brier scores, calibration curves, win rate\n"
-            "  Equity Curve   - Portfolio value and drawdown charts\n"
-            "  Backtest       - Historical replay or full LLM simulation\n"
-            "  System Status  - Health check of all components\n"
-            "  Settings       - View current configuration\n"
+            "[bold]Main Menu[/bold]\n"
+            "  Auto Trading (Crypto) - BTC/ETH/SOL markets every 15 min\n"
+            "  Auto Trading (All)    - All viable markets every 60 min\n"
+            "  Portfolio             - Open positions and P&L summary\n"
+            "  Advanced              - All other tools (scanner, backtest, etc.)\n"
+            "\n"
+            "[bold]Advanced Menu[/bold]\n"
+            "  Market Scanner  - Browse and filter active Polymarket markets\n"
+            "  Single Forecast - Run a multi-agent debate on a specific market\n"
+            "  Trade History   - See recently executed trades\n"
+            "  Performance     - Brier scores, calibration curves, win rate\n"
+            "  Equity Curve    - Portfolio value and drawdown charts\n"
+            "  Backtest        - Historical replay or full LLM simulation\n"
+            "  System Status   - Health check of all components\n"
+            "  Settings        - View current configuration\n"
             "\n"
             "[bold]CLI Commands[/bold]\n"
             "  python cli.py start                      Launch interactive terminal\n"

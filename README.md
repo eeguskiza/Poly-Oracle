@@ -30,14 +30,22 @@ python cli.py start --paper      # forzar paper
 python cli.py start --live       # forzar live
 ```
 
-### Que hace cada opcion del menu
+### Menu principal (5 opciones)
 
 | Opcion | Que hace |
 |--------|----------|
-| **Start Trading** | Loop autonomo: escanea mercados, debate, ejecuta trades. Corre hasta Ctrl+C |
-| **Market Scanner** | Lista mercados activos de Polymarket con precio, volumen, liquidez. Puedes lanzar forecast desde aqui |
-| **Single Forecast** | Metes un market ID, corre el debate completo y te dice si hay edge para tradear |
+| **Auto Trading (Crypto)** | Trading autonomo BTC/ETH/SOL cada 15 min. Usa CryptoSelector. Sin prompts, empieza directo |
+| **Auto Trading (All)** | Trading autonomo todos los mercados viables cada 60 min. Usa ViabilitySelector |
 | **Portfolio** | Posiciones abiertas, P&L por posicion, resumen de bankroll |
+| **Advanced** | Submenu con todas las herramientas tecnicas |
+| **Exit** | Salir |
+
+### Submenu Advanced
+
+| Opcion | Que hace |
+|--------|----------|
+| **Market Scanner** | Lista mercados activos de Polymarket con precio, volumen, liquidez |
+| **Single Forecast** | Metes un market ID, corre el debate completo y te dice si hay edge |
 | **Trade History** | Ultimos 30 trades ejecutados con timestamps y status |
 | **Performance** | Brier scores (raw vs calibrado), win rate, value vs market |
 | **Equity Curve** | Grafico ASCII de la evolucion del bankroll + drawdown |
