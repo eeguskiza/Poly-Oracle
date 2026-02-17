@@ -1,27 +1,21 @@
 [build-system]
 requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "poly-oracle"
-version = "0.1.0"
-description = "Multi-agent forecasting system for Polymarket prediction markets"
-requires-python = ">=3.11"
+version = "1.0.0"
+description = "Single-market BTC trading bot for Polymarket prediction markets"
+requires-python = ">=3.10"
 dependencies = [
     "typer",
     "loguru",
     "pydantic",
     "pydantic-settings",
     "httpx",
-    "duckdb",
-    "chromadb",
-    "feedparser",
     "pyyaml",
-    "scikit-learn",
     "rich",
-    "questionary",
     "py-clob-client",
-    "plotext",
 ]
 
 [project.optional-dependencies]
@@ -33,7 +27,7 @@ dev = [
 ]
 
 [project.scripts]
-poly-oracle = "cli:app"
+poly-oracle = "cli:main"
 
 [tool.ruff]
 line-length = 100
