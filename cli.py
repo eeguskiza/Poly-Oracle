@@ -2,57 +2,47 @@
 
 Usage:
     python cli.py start
+    python cli.py start --check
     python cli.py start --help
 """
 
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
+from pathlib import Path
 
-LOGGER_NAME = "poly_oracle"
-
-BANNER_LINES = [
-    "============================================================",
-    "POLY-ORACLE V1 STARTUP | SKELETON MODE | NO TRADING EXECUTION",
-    "STRICT MODE: START COMMAND IS A BOOT PATH STUB ONLY",
-    "============================================================",
-]
-
-TODO_CHECKPOINTS = [
-    "Wire config loader and env validation.",
-    "Connect market data adapters and cache layer.",
-    "Attach strategy orchestration pipeline.",
-    "Attach execution + risk guards.",
-    "Attach state persistence and monitoring hooks.",
-]
-
-
-def _configure_logging() -> logging.Logger:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
-    return logging.getLogger(LOGGER_NAME)
+from bot.startup import run_startup
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="poly-oracle",
-        description="Poly-Oracle v1 CLI skeleton.",
+        description="Poly-Oracle v1 CLI.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     start_parser = subparsers.add_parser(
         "start",
-        help="Boot the v1 startup path (stub).",
-        description="Boot the v1 startup path and emit migration TODO checkpoints.",
+        help="Execute deterministic startup orchestration.",
+        description="Run the startup pipeline with strict validation and fail-fast behavior.",
     )
     start_parser.add_argument(
-        "--live",
+        "--check",
         action="store_true",
-        help="Preview live mode startup path (still stubbed).",
+        help="Run preflight startup checks without entering the loop.",
+    )
+    start_parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("bot/config/startup.json"),
+        help="Path to JSON startup config file.",
+    )
+    start_parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=Path(".env"),
+        help="Path to .env file to load before validation.",
     )
     start_parser.set_defaults(handler=_handle_start)
 
@@ -60,18 +50,17 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _handle_start(args: argparse.Namespace) -> int:
-    logger = _configure_logging()
-    mode = "LIVE" if args.live else "PAPER"
-
-    for line in BANNER_LINES:
-        logger.info(line)
-
-    logger.info("BOOT MODE: %s", mode)
-    for idx, checkpoint in enumerate(TODO_CHECKPOINTS, start=1):
-        logger.warning("TODO-CHECKPOINT-%02d: %s", idx, checkpoint)
-
-    logger.info("Startup stub completed successfully.")
-    return 0
+    result = run_startup(
+        check=bool(args.check),
+        config_path=args.config,
+        env_path=args.env_file,
+    )
+    if result.exit_code != 0:
+        print(
+            f"STARTUP_EXIT reason={result.reason} code={result.exit_code}",
+            file=sys.stderr,
+        )
+    return result.exit_code
 
 
 def main(argv: list[str] | None = None) -> int:

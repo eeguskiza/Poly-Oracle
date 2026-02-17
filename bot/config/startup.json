@@ -1,0 +1,23 @@
+{
+  "app": {
+    "name": "poly-oracle-v1"
+  },
+  "logging": {
+    "level": "INFO"
+  },
+  "state": {
+    "sqlite_path": "state/poly_oracle.db"
+  },
+  "polymarket": {
+    "base_url": "https://clob.polymarket.com",
+    "market_symbol": "BTC"
+  },
+  "data_feeds": {
+    "primary": "polymarket_primary_placeholder",
+    "fallback": "polymarket_fallback_placeholder",
+    "warmup_cycles": 2
+  },
+  "loop": {
+    "interval_seconds": 30
+  }
+}

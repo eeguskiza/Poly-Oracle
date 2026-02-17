@@ -1,40 +1,49 @@
-# Poly-Oracle v1 Skeleton
+# Poly-Oracle v1 Startup Baseline
 
-Phase 1 provides a clean baseline with a minimal CLI boot path and package layout for future migration work.
+Phase 2 implements a deterministic, fail-fast startup orchestration for `python cli.py start`.
 
-## Current root layout
+## Config Format Choice
 
-- `cli.py`
-- `bot/`
-- `tests/`
-- `pyproject.toml`
-- `requirements.txt`
-- `.env.example`
-- `README.md`
-- `legacy/`
+Startup config uses JSON (`bot/config/startup.json`).
 
-## Run
+Justification:
+- JSON parsing is available in Python standard library (`json`), so startup has no extra parser dependency risk.
+- JSON types are strict and deterministic for schema validation.
+- Error locations (line/column) are clear when parsing fails.
+
+## Startup Pipeline (`start`)
+
+Order executed:
+1. Load `.env` and JSON config.
+2. Validate strict settings schema.
+3. Initialize structured logger.
+4. Initialize SQLite state store.
+5. Resolve BTC target market (single-market mode).
+6. Initialize primary + fallback data feed placeholders.
+7. Warm up feed buffers.
+8. Initialize trading loop coordinator scaffold.
+9. Register graceful shutdown handlers.
+10. Exit with explicit code/reason on fatal conditions, or continue loop / return preflight success.
+
+## Commands
 
 ```bash
-python cli.py start --help
-python cli.py start
+python3 cli.py start --help
+python3 cli.py start --check
+python3 cli.py start
 ```
 
-## Smoke test
+## Tests
 
 ```bash
-python -m pytest tests/test_cli_smoke.py -q
+./venv/bin/python -m pytest tests -q
 ```
 
-## Migration note
+## Migration Note
 
-Legacy code was moved instead of deleted to keep migration safe and auditable:
-
-- `legacy/phase1_snapshot/bot_pre_cleanup/`: previous `bot/` implementation before skeleton reset.
-- `legacy/phase1_snapshot/tests_pre_cleanup/`: previous `tests/` suite before smoke-only reset.
-- `legacy/phase1_snapshot/tools/test`: previous root `test` helper script.
-- `legacy/phase1_snapshot/root_deleted_snapshot/`: archived content from tracked files that were removed from root paths (for example old `src/`, `config/`, and historical tests).
-- Existing prior archives under `legacy/src/` and `legacy/config/` remain unchanged.
-- `legacy/phase1_snapshot/MOVED_FILES.txt`: exact file-level manifest for this Phase 1 move.
-
-Reason: isolate obsolete paths under `legacy/` so v1 can evolve from a small, stable surface without irreversible deletions.
+Legacy code remains archived under `legacy/` and was not deleted to preserve migration safety:
+- `legacy/phase1_snapshot/bot_pre_cleanup/`
+- `legacy/phase1_snapshot/tests_pre_cleanup/`
+- `legacy/phase1_snapshot/root_deleted_snapshot/`
+- `legacy/phase1_snapshot/MOVED_FILES.txt`
+- Existing previous archives under `legacy/src/` and `legacy/config/`
